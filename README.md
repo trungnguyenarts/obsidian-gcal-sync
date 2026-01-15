@@ -1,4 +1,4 @@
-# Obsidian Google Calendar Sync (Tigien Folk Edition)
+# Obsidian Google Calendar Sync (Trungnguyenarts Folk Edition)
 
 ## Overview
 
@@ -13,7 +13,7 @@ This edition includes several "quality of life" improvements developed to stream
 Compared to the base version, this edition offers:
 
 *   **Enhanced Task Parsing**:
-    *   **Flexible Time Syntax**: Supports the standard `-` separator for time ranges (e.g., `⏰ 09:00 - 10:00`) in addition to the `➡️` icon.
+    *   **Flexible Time Syntax**: Supports the standard `-` separator for time ranges (e.g., `⏰ 09:00 - 10:00`). 
     *   **Expanded Status Support**: Recognizes more task states like `/` (In Progress), `>` (Deferred), and `!` (Important).
 *   **Smart Content Handling**:
     *   **Title/Description Split**: Use the `//` separator to keep your Google Calendar clean. Text before `//` becomes the event title; text after becomes the event description.
@@ -57,7 +57,7 @@ To sync a task, use the following standardized format:
 ### Date & Time Formats
 *   `📅 YYYY-MM-DD`: Task date.
 *   `⏰ HH:MM`: Start time.
-*   `- HH:MM` or `➡️ HH:MM`: End time.
+*   `- HH:MM`: End time. (Sử dụng dấu `-` để tương thích tốt nhất với giao diện Timeline của Obsidian Calendar plugin).
 *   `🔔 30m / 🔔 2h / 🔔 1d`: Reminder offset.
 
 ### Color Mapping (Numerical)
