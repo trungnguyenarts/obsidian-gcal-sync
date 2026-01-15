@@ -74,4 +74,4 @@ Use `🎨 #<1-11>` to match Google Calendar's default color palette (e.g., `🎨
 Building upon the great work by **Sasoon Sarkisian**. For the folk version details, refer to the project logs in the documentation.
 
 ---
-*Developed and maintained by **trungnguyenarts** (tigien) with help from **Em Thư Ký**.*
+*Developed and maintained by **trungnguyenarts** with help from **Em Thư Ký**.*
