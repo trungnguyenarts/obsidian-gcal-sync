@@ -8,13 +8,12 @@ import { TimeUtils } from '../utils/timeUtils';
 import { retryWithBackoff } from '../utils/retryUtils';
 import { hasTaskChanged } from '../utils/taskUtils';
 import { useStore } from '../core/store';
-import { TIMING, LOG_LEVELS } from '../config/constants';
+import { TIMING } from '../config/constants';
 import { RepairManager } from '../repair/repairManager';
 import { Platform } from 'obsidian';
 
 interface GoogleCalendarEventInput {
     summary: string;
-    description?: string; // Added for multi-line description
     start: { date?: string; dateTime?: string };
     end: { date?: string; dateTime?: string };
     extendedProperties: {
@@ -31,7 +30,6 @@ interface GoogleCalendarEventInput {
             minutes: number;
         }>;
     };
-    colorId?: string; // Add colorId field
 }
 
 interface RateLimitState {
@@ -70,34 +68,9 @@ export class CalendarSync {
     }
 
     /**
-     * Determines the appropriate emoji prefix for a task's title based on its status.
-     * @param task The task object.
-     * @returns The emoji prefix string.
-     */
-    private getTaskEmojiPrefix(task: Task): string {
-        if (task.completed) {
-            return LOG_LEVELS.SUCCESS; // ✅
-        }
-        // Check for specific Obsidian task statuses
-        if (task.status === '/') { // In Progress
-            return LOG_LEVELS.IN_PROGRESS; // 🚧
-        }
-        if (task.status === '-') { // Cancelled
-            return LOG_LEVELS.CANCELLED; // 🚫
-        }
-        if (task.status === '>') { // Deferred
-            return LOG_LEVELS.DEFERRED; // ⏩
-        }
-        if (task.status === '!') { // Important
-            return LOG_LEVELS.IMPORTANT; // 🔥
-        }
-        return ''; // No special prefix for other statuses or if not completed
-    }
-
-    /**
      * Clears the events cache to force fresh data on next request
      */
-    public clearEventsCache(): void {
+    private clearEventsCache(): void {
         this.eventsCache = {
             events: null,
             timestamp: 0,
@@ -147,12 +120,15 @@ export class CalendarSync {
             if (Date.now() - startTime > maxWaitTime) {
                 LogUtils.warn(`Lock acquisition timeout for key "${normalizedKey}" (operation: ${operationId}) after ${maxWaitTime}ms`);
 
-                // Instead of throwing, force-release the lock if it appears to be stale
+                // Check if the lock appears to be stale
                 const lockTime = state.getLockTimestamp(normalizedKey);
                 if (lockTime && Date.now() - lockTime > TIMING.LOCK_TIMEOUT_MS) {
-                    LogUtils.warn(`Force-releasing potentially stale lock for key "${normalizedKey}" (locked for ${Date.now() - lockTime}ms)`);
+                    // Force-release the stale lock, but DON'T proceed with this operation
+                    // The original operation might still be running (just slow/stuck)
+                    LogUtils.warn(`Force-releasing stale lock for key "${normalizedKey}" (locked for ${Date.now() - lockTime}ms)`);
                     state.removeProcessingTask(normalizedKey);
-                    break;
+                    // Abort this operation to prevent duplicate execution
+                    throw new Error(`Stale lock released for "${normalizedKey}". Operation ${operationId} aborted - retry will be scheduled.`);
                 }
 
                 throw new Error(`Lock timeout: Failed to acquire lock for key "${normalizedKey}" after ${maxWaitTime}ms (operation: ${operationId})`);
@@ -261,18 +237,14 @@ export class CalendarSync {
                     return;
                 }
 
-                // Get the emoji prefix
-                const emojiPrefix = this.getTaskEmojiPrefix(task);
-                const prefixedTaskTitle = emojiPrefix ? `${emojiPrefix} ${task.title}` : task.title;
-                const event = this.createEventFromTask({ ...task, title: prefixedTaskTitle });
-
+                const event = this.createEventFromTask(task);
                 await this.makeRequest(`/calendars/primary/events/${eventId}`, 'PUT', event);
                 LogUtils.debug(`Updated event ${eventId} for task ${task.id}`);
 
                 const updatedMetadata = {
                     ...metadata,
                     eventId,
-                    title: prefixedTaskTitle, // Update metadata title with the prefixed title
+                    title: task.title,
                     date: task.date,
                     time: task.time,
                     endTime: task.endTime,
@@ -297,19 +269,26 @@ export class CalendarSync {
         if (metadata?.justSynced && metadata.syncTimestamp) {
             const syncAge = Date.now() - metadata.syncTimestamp;
             if (syncAge < 1500) {
-                LogUtils.debug(`⚡ Task ${taskId} was just synced ${syncAge}ms ago, skipping withQueuedProcessing entirely`);
+                LogUtils.debug(`Task ${taskId} was just synced ${syncAge}ms ago, skipping`);
                 return undefined;
             }
         }
 
-        // If task is being processed, check if it's just a reminder change
-        if (this.processingQueue.has(taskId)) {
+        // ATOMIC CHECK-AND-ADD: Do this synchronously (no await) to prevent race conditions
+        // JavaScript is single-threaded for synchronous operations
+        const alreadyProcessing = this.processingQueue.has(taskId);
+        if (!alreadyProcessing) {
+            // Claim the slot BEFORE any await to prevent races
+            this.processingQueue.add(taskId);
+        }
+
+        // Handle the "already processing" case (now safe to do async operations)
+        if (alreadyProcessing) {
             try {
-                const state = useStore.getState();
                 const freshTask = await this.getTaskData(taskId);
 
                 if (freshTask && metadata) {
-                    LogUtils.debug(`Task ${taskId} has new changes while being processed, waiting for current operation to finish`);
+                    LogUtils.debug(`Task ${taskId} has changes while being processed, waiting for current operation`);
                     const currentPromise = this.processingPromises.get(taskId);
                     if (currentPromise) {
                         await currentPromise;
@@ -320,10 +299,10 @@ export class CalendarSync {
                 LogUtils.error(`Error checking task state for ${taskId}:`, error);
                 return undefined;
             }
+            return undefined;
         }
 
-        // Add to processing queue and track with promise
-        this.processingQueue.add(taskId);
+        // We own the slot in processingQueue (added synchronously above)
         const promise = (async () => {
             try {
                 return await operation();
@@ -356,15 +335,7 @@ export class CalendarSync {
                     const duplicates = taskEvents.filter(e => e.id !== metadata.eventId);
                     if (duplicates.length > 0) {
                         LogUtils.debug(`Cleaning up ${duplicates.length} duplicate events for task ${taskId}`);
-                        await Promise.all(duplicates.map(event => {
-                            if (event.extendedProperties?.private?.obsidianTaskId !== taskId) {
-                                // Log an error/warning if a mismatch is found - this should theoretically not happen
-                                // This means an event belonging to a *different* task was erroneously considered a duplicate for *this* taskId
-                                LogUtils.error(`Skipping deletion of event ${event.id} (obsidianTaskId: ${event.extendedProperties?.private?.obsidianTaskId}) during cleanup for task ${taskId} due to ID mismatch.`);
-                                return Promise.resolve(); // Do not delete this event if its obsidianTaskId doesn't match
-                            }
-                            return this.deleteEvent(event.id, taskId);
-                        }));
+                        await Promise.all(duplicates.map(event => this.deleteEvent(event.id, taskId)));
                     }
                     return metadata.eventId;
                 }
@@ -379,14 +350,7 @@ export class CalendarSync {
                 // Delete duplicates if any
                 if (duplicates.length > 0) {
                     LogUtils.debug(`Cleaning up ${duplicates.length} duplicate events for task ${taskId}`);
-                    await Promise.all(duplicates.map(event => {
-                        if (event.extendedProperties?.private?.obsidianTaskId !== taskId) {
-                            // Log an error/warning if a mismatch is found - this should theoretically not happen
-                            LogUtils.error(`Skipping deletion of event ${event.id} (obsidianTaskId: ${event.extendedProperties?.private?.obsidianTaskId}) during cleanup for task ${taskId} due to ID mismatch.`);
-                            return Promise.resolve(); // Do not delete this event if its obsidianTaskId doesn't match
-                        }
-                        return this.deleteEvent(event.id, taskId);
-                    }));
+                    await Promise.all(duplicates.map(event => this.deleteEvent(event.id, taskId)));
                 }
 
                 return keepEvent.id;
@@ -430,15 +394,40 @@ export class CalendarSync {
                     time: freshTask.time,
                     reminder: freshTask.reminder,
                     completed: freshTask.completed,
-                    filePath: freshTask.filePath,
-                    status: freshTask.status // Include status in logging
+                    filePath: freshTask.filePath
                 })}`);
 
-                // Determine the emoji prefix for the task title
-                const emojiPrefix = this.getTaskEmojiPrefix(freshTask);
-                const prefixedTaskTitle = emojiPrefix ? `${emojiPrefix} ${freshTask.title}` : freshTask.title;
+                // Force sync for completed tasks regardless of change detection
+                if (freshTask.completed) {
+                    LogUtils.debug(`Task ${task.id} is marked as completed, forcing sync to delete events`);
+                    try {
+                        // Delete all events first
+                        const deleteResults = await Promise.allSettled(taskEvents.map(event => this.deleteEvent(event.id)));
 
-                // Handle task updates: update event summary with appropriate emoji
+                        // Check for any failures
+                        const failures = deleteResults.filter(result => result.status === 'rejected');
+
+                        if (failures.length > 0) {
+                            // Log which events failed but DON'T delete metadata yet
+                            LogUtils.error(`Failed to delete ${failures.length}/${taskEvents.length} events for completed task ${task.id}`);
+                            // Keep metadata for retry on next sync
+                            throw new Error(`Failed to delete ${failures.length} events for completed task`);
+                        }
+
+                        // ALL events deleted successfully, NOW safe to delete metadata
+                        if (metadata) {
+                            delete this.plugin.settings.taskMetadata[task.id];
+                            await this.saveSettings();
+                        }
+                        LogUtils.debug(`Task ${task.id} completed, successfully deleted ${taskEvents.length} associated events`);
+                        return;
+                    } catch (error) {
+                        LogUtils.error(`Error handling completed task ${task.id}:`, error);
+                        throw error;
+                    }
+                }
+
+                // Handle existing events
                 if (taskEvents.length > 0) {
                     // Keep the most recently created event
                     const [keepEvent, ...duplicates] = taskEvents.sort((a, b) =>
@@ -451,21 +440,21 @@ export class CalendarSync {
                         await Promise.all(duplicates.map(event => this.deleteEvent(event.id)));
                     }
 
-                    // Update the kept event with the prefixed title
-                    const event = this.createEventFromTask({ ...freshTask, title: prefixedTaskTitle });
+                    // Update the kept event
+                    const event = this.createEventFromTask(freshTask);
                     await this.makeRequest(`/calendars/primary/events/${keepEvent.id}`, 'PUT', event);
-                    this.updateTaskMetadata({ ...freshTask, title: prefixedTaskTitle }, keepEvent.id, metadata); // Pass prefixed title
+                    this.updateTaskMetadata(freshTask, keepEvent.id, metadata);
                     await this.saveSettings();
-                    LogUtils.debug(`Updated existing event ${keepEvent.id} for task ${freshTask.id} with title: "${prefixedTaskTitle}"`);
+                    LogUtils.debug(`Updated existing event ${keepEvent.id} for task ${task.id}`);
                     return;
                 }
 
                 // Create new event only if we don't have any existing ones
-                const newEventId = await this.createEvent({ ...freshTask, title: prefixedTaskTitle }); // Pass prefixed title
+                const newEventId = await this.createEvent(freshTask);
                 if (newEventId) {
-                    this.updateTaskMetadata({ ...freshTask, title: prefixedTaskTitle }, newEventId, metadata); // Pass prefixed title
+                    this.updateTaskMetadata(freshTask, newEventId, metadata);
                     await this.saveSettings();
-                    LogUtils.debug(`Created new event ${newEventId} for task ${freshTask.id} with title: "${prefixedTaskTitle}"`);
+                    LogUtils.debug(`Created new event ${newEventId} for task ${task.id}`);
                 }
             } catch (error) {
                 LogUtils.error(`Failed to sync task ${task.id}:`, error);
@@ -516,8 +505,7 @@ export class CalendarSync {
             version: newVersion,                // Explicit version counter
             syncOperationId: opId,              // Operation ID for tracing
             justSynced: true,                   // Flag to prevent double-syncing
-            syncTimestamp: currentTime,          // When the sync occurred
-            colorId: task.colorId               // Add colorId to metadata
+            syncTimestamp: currentTime          // When the sync occurred
         };
 
         LogUtils.debug(`⏰ Set justSynced and syncTimestamp=${currentTime} for task ${task.id}`); // Extra logging for debugging
@@ -538,7 +526,9 @@ export class CalendarSync {
             }
         }, TIMING.JUST_SYNCED_FLAG_CLEAR_MS);  // 3.5 second cooldown - longer to ensure it covers all event handlers
 
-
+        // Clear the events cache to ensure fresh data for the next request
+        // This is important after modifying an event
+        this.clearEventsCache();
 
         // On mobile, ensure the timestamp is synchronized with additional logging
         if (Platform.isMobile) {
@@ -896,7 +886,6 @@ export class CalendarSync {
         if (!task.time) {
             return {
                 summary: task.title,
-                description: task.description,
                 start: { date: task.date },
                 end: { date: task.date },
                 extendedProperties: {
@@ -909,8 +898,7 @@ export class CalendarSync {
                 reminders: {
                     useDefault: false,
                     overrides: reminderOverrides
-                },
-                ...(task.colorId && { colorId: task.colorId })
+                }
             };
         }
 
@@ -922,7 +910,6 @@ export class CalendarSync {
 
         return {
             summary: task.title,
-            description: task.description,
             start: { dateTime: startDateTime },
             end: { dateTime: endDateTime },
             extendedProperties: {
@@ -935,8 +922,7 @@ export class CalendarSync {
             reminders: {
                 useDefault: false,
                 overrides: reminderOverrides
-            },
-            ...(task.colorId && { colorId: task.colorId })
+            }
         };
     }
 

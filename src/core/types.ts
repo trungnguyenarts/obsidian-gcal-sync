@@ -22,7 +22,6 @@ declare module "obsidian" {
 export interface Task {
     id: string;
     title: string;
-    description?: string; // Added for multi-line description
     date: string;
     eventId?: string;
     time?: string;
@@ -32,8 +31,6 @@ export interface Task {
     completedDate?: string;
     createdAt: number;
     filePath?: string;
-    status?: string; // Add status field
-    colorId?: string; // Add colorId field for Google Calendar
 }
 
 export interface TaskMetadata {
@@ -59,8 +56,6 @@ export interface TaskMetadata {
         fields: string[];
         resolution: 'auto' | 'manual';
     };
-    pendingDeletionTimestamp?: number;
-    colorId?: string; // Add colorId field for Google Calendar
 }
 
 export interface GoogleCalendarSettings {
@@ -80,7 +75,6 @@ export interface GoogleCalendarSettings {
     mobileOptimizations?: boolean; // Enable mobile-specific optimizations (default: true)
     tempAuthState?: string; // Temporary storage for mobile auth state parameter
     tempCodeVerifier?: string; // Temporary storage for mobile auth code verifier
-    deletionGracePeriodMs?: number; // Grace period for pending deletions
 }
 
 export interface Pos {
@@ -174,7 +168,6 @@ export interface ParsedTaskData {
     time?: string;
     endTime?: string;
     reminder?: number;
-    colorId?: string; // Add colorId field for Google Calendar
 }
 
 /**

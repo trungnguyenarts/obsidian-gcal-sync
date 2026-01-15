@@ -8,7 +8,6 @@ import { ErrorUtils } from '../utils/errorUtils';
 import { TimeUtils } from '../utils/timeUtils';
 import { hasTaskChanged } from '../utils/taskUtils';
 import { Platform } from 'obsidian';
-import { LOG_LEVELS } from '../config/constants';
 
 export class TaskId {
     private static readonly PATTERN = /<!-- task-id: [a-z0-9]+ -->/;
@@ -21,13 +20,11 @@ export class TaskId {
 export class TaskParser {
     private readonly DATE_PATTERN = /📅\s*(\d{4}-\d{2}-\d{2})/;
     private readonly TIME_PATTERN = /⏰\s*(\d{1,2}:\d{2})/;
-    private readonly END_TIME_PATTERN = /[➡️-]\s*(\d{1,2}:\d{2})/;;
+    private readonly END_TIME_PATTERN = /➡️\s*(\d{1,2}:\d{2})/;
     private readonly REMINDER_PATTERN = /🔔\s*(\d+)([mhd])/;
-    private readonly TASK_PATTERN = /^- \[[ xX\/\->!]\] (.+)/; // Updated to include new task statuses
-    private readonly TASK_STATUS_PATTERN = /^- \[(.)\]/; // Capture the status character itself
+    private readonly TASK_PATTERN = /^- \[[ xX]\] (.+)/;
     private readonly COMPLETION_PATTERN = /✅\s*(\d{4}-\d{2}-\d{2})/;
     private readonly ID_PATTERN = /<!-- task-id: ([a-z0-9]+) -->/;
-    private readonly COLOR_ID_PATTERN = /🎨\s*#([a-zA-Z0-9]+)/;
 
     constructor(private plugin: GoogleCalendarSyncPlugin) { }
 
@@ -203,32 +200,22 @@ export class TaskParser {
     }
 
     public isTaskLine(line: string): boolean {
-        const trimmedLine = line.trim();
-        return this.TASK_PATTERN.test(trimmedLine) && this.TIME_PATTERN.test(trimmedLine);
+        return this.TASK_PATTERN.test(line.trim());
     }
 
     public async parseTask(line: string, filePath?: string): Promise<Task | null> {
         try {
-            // Split the full content into primary task line and sub-lines
-            const linesContent = line.split('\n');
-            const primaryTaskLine = linesContent[0];
-            const subLinesContent = linesContent.slice(1).join('\n').trim(); // Trim to remove any leading/trailing blank lines from sub-content
-
-            const taskData = this.parseTaskData(primaryTaskLine); // Use primaryTaskLine for data extraction
-
-            // Extract task status character
-            const statusMatch = primaryTaskLine.match(this.TASK_STATUS_PATTERN);
-            const status = statusMatch ? statusMatch[1] : ' '; // Default to space if no explicit status
-
-            // Quick check for tasks without required date format (only for tasks that are not completed)
-            if (status.toLowerCase() !== 'x' && !primaryTaskLine.includes('📅')) {
+            // Quick check for completed tasks without required date format
+            // This avoids expensive processing for tasks that will ultimately be rejected
+            if (this.isTaskCompleted(line) && !line.includes('📅')) {
                 // Only log in verbose mode
                 if (this.plugin.settings.verboseLogging) {
-                    LogUtils.debug('Skipping task without date format and not completed');
+                    LogUtils.debug('Skipping completed task without date format');
                 }
                 return null;
             }
 
+            const taskData = this.parseTaskData(line);
             // Silently skip invalid tasks without logging
             if (!taskData || !this.isValidTaskData(taskData)) {
                 // Only log in verbose mode
@@ -238,32 +225,17 @@ export class TaskParser {
                 return null;
             }
 
-            let summary = primaryTaskLine;
-            let description = '';
-
-            // Handle '//' separator for summary and description
-            const descriptionSeparatorIndex = primaryTaskLine.indexOf('//');
-            if (descriptionSeparatorIndex !== -1) {
-                summary = primaryTaskLine.substring(0, descriptionSeparatorIndex).trim();
-                description = primaryTaskLine.substring(descriptionSeparatorIndex + 2).trim();
-            }
-
-            const cleanedSummary = this.cleanTitleForSummary(summary); // Use the new helper
-            if (!cleanedSummary) {
+            const title = this.cleanTaskTitle(line);
+            if (!title) {
                 // Only log in verbose mode
                 if (this.plugin.settings.verboseLogging) {
-                    LogUtils.debug('Empty task title after cleaning');
+                    LogUtils.debug('Empty task title');
                 }
                 return null;
             }
 
-            // Combine initial description part from primary line with sub-lines
-            if (subLinesContent) {
-                description = (description ? description + '\n' : '') + subLinesContent;
-            }
-
-            // Extract ID from primary task line
-            const idMatch = primaryTaskLine.match(this.ID_PATTERN);
+            // Extract ID without affecting display
+            const idMatch = line.match(this.ID_PATTERN);
             const id = idMatch ? idMatch[1] : '';
 
             // Get existing metadata if available
@@ -274,17 +246,14 @@ export class TaskParser {
 
             const task: Task = {
                 id,
-                title: cleanedSummary, // Use the new cleaned summary
-                description: description || undefined, // Assign the combined description
+                title,
                 date: taskData.date || '',
                 time: taskData.time,
                 endTime: taskData.endTime,
                 reminder: taskData.reminder,
-                completed: status.toLowerCase() === 'x', // Check completion based on extracted status
+                completed: this.isTaskCompleted(line),
                 createdAt: metadata?.createdAt || Date.now(),
-                completedDate: this.getCompletionDate(primaryTaskLine), // Get completion date from primary line
-                status: status, // Assign the extracted status
-                colorId: taskData.colorId // Assign the extracted color ID
+                completedDate: this.getCompletionDate(line)
             };
 
             // Use atomic state access
@@ -399,9 +368,17 @@ export class TaskParser {
     }
 
     private isTaskCompleted(line: string): boolean {
-        const statusMatch = line.match(this.TASK_STATUS_PATTERN);
-        const statusChar = statusMatch ? statusMatch[1] : '';
-        return statusChar.toLowerCase() === 'x';
+        // Normalize whitespace and case
+        const normalizedLine = line.toLowerCase().trim();
+
+        // Check for various completion markers
+        return normalizedLine.includes('[x]') ||
+            normalizedLine.includes('[✓]') ||
+            normalizedLine.includes('[✔]') ||
+            normalizedLine.includes('[✕]') ||
+            normalizedLine.includes('[✖]') ||
+            normalizedLine.includes('[✗]') ||
+            normalizedLine.includes('[✘]');
     }
 
     private getCompletionDate(line: string): string | undefined {
@@ -481,8 +458,7 @@ export class TaskParser {
             taskContent += `${task.title}` +
                 (task.date ? ` 📅 ${task.date}` : '') +
                 (task.time ? ` ⏰ ${task.time}` : '') +
-                (task.endTime ? ` - ${task.endTime}` : '') +
-                (task.colorId ? ` 🎨 #${task.colorId}` : '');
+                (task.endTime ? ` ➡️ ${task.endTime}` : '');
 
             // Format task with proper indentation for multi-line content
             const formattedTaskLine = task.title.includes('\n')
@@ -589,65 +565,13 @@ export class TaskParser {
         return view.editor?.cm;
     }
 
-    private cleanTitleForSummary(rawTitle: string): string {
-        let cleaned = rawTitle;
-
-        // Remove Obsidian task status markers (e.g., - [x], - [/])
-        cleaned = cleaned.replace(/^- \[[ xX\/\->!]\]\s*/, '');
-
-        // Remove Google Calendar emojis and their associated dates/patterns
-        cleaned = cleaned.replace(new RegExp(`${LOG_LEVELS.SUCCESS}\\s*\\d{4}-\\d{2}-\\d{2}`, 'g'), '').trim();
-        cleaned = cleaned.replace(new RegExp(`${LOG_LEVELS.IN_PROGRESS}`, 'g'), '').trim();
-        cleaned = cleaned.replace(new RegExp(`${LOG_LEVELS.CANCELLED}`, 'g'), '').trim();
-        cleaned = cleaned.replace(new RegExp(`${LOG_LEVELS.DEFERRED}`, 'g'), '').trim();
-        cleaned = cleaned.replace(new RegExp(`${LOG_LEVELS.IMPORTANT}`, 'g'), '').trim();
-
-        // Process date, time, and other markers with consistent spacing
-        cleaned = cleaned.replace(this.DATE_PATTERN, '').trim();
-        cleaned = cleaned.replace(this.TIME_PATTERN, '').trim();
-        cleaned = cleaned.replace(this.END_TIME_PATTERN, '').trim();
-        cleaned = cleaned.replace(this.REMINDER_PATTERN, '').trim();
-        
-        // Remove the ID with better spacing handling
-        cleaned = cleaned.replace(/<!--\s*task-id:\s*[a-z0-9]+\s*-->/, '').trim();
-        // Remove color ID pattern
-        cleaned = cleaned.replace(this.COLOR_ID_PATTERN, '').trim();
-
-        // Remove hashtags/tags (including those with numbers like #1a1a1a)
-        cleaned = cleaned.replace(/#[a-zA-Z0-9_]+/g, '').trim();
-
-        // Remove Obsidian Tasks plugin emojis and their associated values
-        cleaned = cleaned.replace(/🛫\s*\d{4}-\d{2}-\d{2}/g, '').trim();
-        cleaned = cleaned.replace(/⏳\s*\d{4}-\d{2}-\d{2}/g, '').trim();
-        cleaned = cleaned.replace(/🔁\s*[^\s]*/g, '').trim();
-        cleaned = cleaned.replace(/📅\s*[^\s]*/g, '').trim();
-        cleaned = cleaned.replace(/[⏫🔼🔽🔺⏬]/g, '').trim();
-        cleaned = cleaned.replace(/🆔\s*[^\s]+/g, '').trim();
-        cleaned = cleaned.replace(/[⛔❌➕⏩]\s*[^\s]+/g, '').trim();
-        
-        // Remove standalone dates that weren't caught by emoji patterns
-        cleaned = cleaned.replace(/\b\d{4}-\d{2}-\d{2}\b/g, '').trim();
-
-        // Clean up any double spaces that might have been created
-        cleaned = cleaned.replace(/\s{2,}/g, ' ').trim();
-
-        return cleaned;
-    }
-
     public cleanTaskTitle(line: string): string {
         // First clean the task header (first line)
         const lines = line.split('\n');
         let header = lines[0];
 
-        // Remove Obsidian task status markers (e.g., - [x], - [/])
-        header = header.replace(/^- \[[ xX\/\->!]\]\s*/, '');
-
-        // Remove Google Calendar emojis and their associated dates/patterns
-        header = header.replace(new RegExp(`${LOG_LEVELS.SUCCESS}\\s*\\d{4}-\\d{2}-\\d{2}`, 'g'), '').trim();
-        header = header.replace(new RegExp(`${LOG_LEVELS.IN_PROGRESS}`, 'g'), '').trim();
-        header = header.replace(new RegExp(`${LOG_LEVELS.CANCELLED}`, 'g'), '').trim();
-        header = header.replace(new RegExp(`${LOG_LEVELS.DEFERRED}`, 'g'), '').trim();
-        header = header.replace(new RegExp(`${LOG_LEVELS.IMPORTANT}`, 'g'), '').trim();
+        // Remove checkbox with proper spacing handling
+        header = header.replace(/^- \[[xX ]\]\s*/, '');
 
         // Process date, time, and other markers with consistent spacing
         // This helps prevent data corruption and ensures consistent format
@@ -656,11 +580,10 @@ export class TaskParser {
         header = header.replace(this.TIME_PATTERN, '').trim();
         header = header.replace(this.END_TIME_PATTERN, '').trim();
         header = header.replace(this.REMINDER_PATTERN, '').trim();
-        
+        header = header.replace(/✅ \d{4}-\d{2}-\d{2}/, '').trim();
+
         // Remove the ID with better spacing handling
         header = header.replace(/<!--\s*task-id:\s*[a-z0-9]+\s*-->/, '').trim();
-        // Remove color ID pattern
-        header = header.replace(this.COLOR_ID_PATTERN, '').trim();
 
         // Remove hashtags/tags (including those with numbers like #1a1a1a)
         header = header.replace(/#[a-zA-Z0-9_]+/g, '').trim();
@@ -695,7 +618,7 @@ export class TaskParser {
         return header;
     }
 
-    private parseTaskData(line: string): ParsedTaskData {
+    private parseTaskData(line: string): { date?: string, time?: string, endTime?: string, reminder?: number } {
         // Only log if verbose logging is enabled
         if (this.plugin.settings.verboseLogging) {
             LogUtils.debug(`Parsing task data from line: ${line}`);
@@ -707,7 +630,6 @@ export class TaskParser {
         const timeMatch = line.match(this.TIME_PATTERN);
         const endTimeMatch = line.match(this.END_TIME_PATTERN);
         const reminderMatch = line.match(this.REMINDER_PATTERN);
-        const colorIdMatch = line.match(this.COLOR_ID_PATTERN);
 
         // Parse reminder if present
         let reminder: number | undefined = undefined;
@@ -725,8 +647,7 @@ export class TaskParser {
             date: dateMatch?.[1],
             time: timeMatch?.[1]?.padStart(5, '0'),
             endTime: endTimeMatch?.[1]?.padStart(5, '0'),
-            reminder,
-            colorId: colorIdMatch?.[1]
+            reminder
         };
 
         // Only log if verbose logging is enabled
@@ -944,9 +865,26 @@ export class TaskParser {
                 // Look ahead for indented continuation lines
                 let j = i + 1;
                 while (j < lines.length && lines[j].startsWith('    ')) {
+                    // For mobile compatibility, ensure all task IDs stay on the main task line
+                    // Move any IDs found in indented lines to the main task line
+                    const idMatch = lines[j].match(this.ID_PATTERN);
+                    if (idMatch) {
+                        // Remove the ID from the indented line
+                        lines[j] = lines[j].replace(this.ID_PATTERN, '').trim();
+
+                        // If the main task line doesn't already have this ID, add it
+                        if (!currentTaskLine.includes(idMatch[0])) {
+                            // If the task line already has an ID, log but don't add another
+                            if (currentTaskLine.match(this.ID_PATTERN)) {
+                                LogUtils.debug(`Task already has an ID, skipping additional ID: ${idMatch[0]}`);
+                            } else {
+                                currentTaskLine += ' ' + idMatch[0];
+                            }
+                        }
+                    }
+
                     // Add the indented line (without IDs) to the current task
-                    const cleanedNextLine = lines[j].replace(this.ID_PATTERN, '').trimEnd();
-                    currentTaskLine += '\n' + cleanedNextLine;
+                    currentTaskLine += '\n' + lines[j];
                     j++;
                 }
 

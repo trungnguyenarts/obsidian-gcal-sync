@@ -30,17 +30,22 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
     private lastContent: string[] = [];
     private cleanupInterval: number | null = null;
     public mobileAuthInitiated: boolean = false;
-    public isPluginActive: boolean = false;
 
     async onload() {
         try {
             console.log('Loading Google Calendar Sync plugin...');
-            this.isPluginActive = true;
 
             // Load settings first
             await this.loadSettings();
-            const credentials = loadGoogleCredentials();
-            this.settings.clientId = credentials.clientId;
+
+            // Only set default clientId if user hasn't provided custom credentials
+            if (!this.settings.clientId || !this.settings.clientSecret) {
+                const credentials = loadGoogleCredentials();
+                // Only set clientId if not already set by user
+                if (!this.settings.clientId) {
+                    this.settings.clientId = credentials.clientId;
+                }
+            }
 
             // Always disable welcome modal
             // Note: saveSettings() removed here - settings will be saved later when needed
@@ -227,8 +232,8 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
             // Register event handlers
             this.registerEventHandlers();
 
-            // Start periodic cleanup (Disabled as per user request to avoid full vault scans)
-            // this.startPeriodicCleanup();
+            // Start periodic cleanup
+            this.startPeriodicCleanup();
 
             // NOTE: File change monitoring is handled in registerEventHandlers()
             // with proper debouncing to prevent double-syncing
@@ -282,7 +287,7 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
                             if (!task.id) continue;
 
                             // Check for just synced tasks and skip them
-                            const metadata = state.plugin?.settings.taskMetadata?.[task.id];
+                            const metadata = state.plugin.settings.taskMetadata?.[task.id];
                             if (metadata?.justSynced && metadata.syncTimestamp) {
                                 const syncAge = Date.now() - metadata.syncTimestamp;
                                 if (syncAge < TIMING.JUST_SYNCED_WINDOW_MS) { // Use a longer window (2 seconds)
@@ -474,51 +479,6 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
         }
     }
 
-    /**
-     * Centralized method to get all tasks from the vault, using the robust file discovery
-     * from repairManager.getMarkdownFiles().
-     * This ensures consistency across full syncs, periodic cleanups, and metadata checks.
-     * @returns A promise that resolves to an array of all tasks found in the vault.
-     */
-    public async getVaultTasks(): Promise<Task[]> {
-        if (!this.repairManager) {
-            LogUtils.error('Repair Manager not initialized when trying to get vault tasks.');
-            return [];
-        }
-
-        const tasks: Task[] = [];
-        const filesToScan = await this.repairManager.getMarkdownFiles();
-        LogUtils.debug(`getVaultTasks: Found ${filesToScan.length} files to scan.`);
-
-        // Process files in batches or with delays to avoid overwhelming the system
-        const BATCH_SIZE = 20; // Or a smaller number if needed
-        for (let i = 0; i < filesToScan.length; i += BATCH_SIZE) {
-            const batch = filesToScan.slice(i, i + BATCH_SIZE);
-            for (const file of batch) {
-                try {
-                    // Invalidate cache and add a small delay for each file to ensure fresh content
-                    const state = useStore.getState();
-                    state.invalidateFileCache(file.path);
-                    await new Promise(resolve => setTimeout(resolve, TIMING.FILE_PROCESSING_DELAY_MS)); // e.g., 20ms
-
-                    const fileTasks = await this.taskParser.parseTasksFromFile(file);
-                    if (fileTasks.length > 0) {
-                        LogUtils.debug(`getVaultTasks: Found ${fileTasks.length} tasks in ${file.path}`);
-                        tasks.push(...fileTasks);
-                    }
-                } catch (error) {
-                    LogUtils.error(`getVaultTasks: Failed to parse tasks from ${file.path}:`, error);
-                }
-            }
-            // Small delay between batches
-            if (i + BATCH_SIZE < filesToScan.length) {
-                await new Promise(resolve => setTimeout(resolve, TIMING.BATCH_PROCESSING_DELAY_MS)); // e.g., 100ms
-            }
-        }
-        LogUtils.debug(`getVaultTasks: Total tasks found: ${tasks.length}`);
-        return tasks;
-    }
-
     public async initializeCalendarSync() {
         if (!this.authManager) return;
 
@@ -568,8 +528,8 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
         const { setStatus } = useStore.getState();
 
         try {
-            // Get all tasks using the centralized getVaultTasks method
-            const tasks = await this.getVaultTasks();
+            // Get all tasks
+            const tasks = await this.getAllTasks();
             const taskIdMap = new Map(tasks.map(t => [t.id, t]));
 
             // Get all metadata entries
@@ -625,39 +585,74 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
 
     private startPeriodicCleanup() {
         // Run cleanup every 5 minutes
-        this.cleanupInterval = window.setInterval(async () => {
+        this.cleanupInterval = window.setInterval(() => {
             useStore.getState().clearStaleProcessingTasks();
-            LogUtils.debug('Starting periodic metadata cleanup.');
-            // Also trigger a metadata cleanup using the repair manager for robustness
-            if (this.repairManager) {
-                try {
-                    const tasks = await this.getVaultTasks(); // Use the centralized method
-                    LogUtils.debug(`Periodic cleanup: Found ${tasks.length} tasks in total.`);
-                    const allTaskIds = new Set(tasks.map(t => t.id));
-                    LogUtils.debug(`Periodic cleanup: ${allTaskIds.size} unique task IDs identified as active.`);
-                    await this.repairManager.cleanupOrphanedMetadata(allTaskIds);
-                    LogUtils.debug('Periodic metadata cleanup completed.');
-                } catch (error) {
-                    LogUtils.error('Periodic orphaned metadata cleanup failed:', error);
-                }
-            }
         }, TIMING.PERIODIC_CLEANUP_INTERVAL_MS);
     }
 
-    // Removed private getAllTasks and cleanupOrphanedMetadata from main.ts
-    // The functionality is now handled by repairManager.
-    // The isTaskFile method is also removed, as file filtering is now consistent via repairManager.getMarkdownFiles().
+    private async cleanupOrphanedMetadata() {
+        const state = useStore.getState();
+        if (!state.isSyncEnabled()) return;
+
+        try {
+            const tasks = await this.getAllTasks();
+            const allTaskIds = new Set(tasks.map(t => t.id));
+            const orphanedIds = Object.keys(this.settings.taskMetadata)
+                .filter(id => !allTaskIds.has(id));
+
+            for (const id of orphanedIds) {
+                if (state.isTaskLocked(id)) {
+                    LogUtils.debug('Orphaned task is locked, skipping cleanup:', id);
+                    continue;
+                }
+
+                try {
+                    state.addProcessingTask(id);
+                    const metadata = this.settings.taskMetadata[id];
+                    if (metadata?.eventId) {
+                        await this.calendarSync?.deleteEvent(metadata.eventId);
+                    }
+                    delete this.settings.taskMetadata[id];
+                    delete this.settings.taskIds[id];
+                } finally {
+                    state.removeProcessingTask(id);
+                }
+            }
+
+            await this.saveSettings();
+        } catch (error) {
+            LogUtils.error('Failed to cleanup orphaned metadata:', error);
+        }
+    }
+
+    private async getAllTasks(): Promise<Task[]> {
+        const tasks: Task[] = [];
+        const files = this.app.vault.getMarkdownFiles();
+
+        for (const file of files) {
+            if (this.settings.includeFolders.length > 0 &&
+                !this.settings.includeFolders.some(folder => file.path.startsWith(folder))) {
+                continue;
+            }
+            try {
+                const fileTasks = await this.taskParser.parseTasksFromFile(file);
+                tasks.push(...fileTasks);
+            } catch (error) {
+                LogUtils.error(`Failed to parse tasks from ${file.path}:`, error);
+            }
+        }
+        return tasks;
+    }
 
     async onunload() {
         try {
-            this.isPluginActive = false; // Mark plugin as inactive
             console.log('🔄 Unloading Google Calendar Sync plugin...');
 
-            // Clear periodic cleanup interval to prevent memory leak (now disabled)
-            // if (this.cleanupInterval) {
-            //     clearInterval(this.cleanupInterval);
-            //     this.cleanupInterval = null;
-            // }
+            // Clear periodic cleanup interval to prevent memory leak
+            if (this.cleanupInterval) {
+                clearInterval(this.cleanupInterval);
+                this.cleanupInterval = null;
+            }
 
             // Clean up any pending sync operations
             useStore.getState().clearSyncQueue();
@@ -883,8 +878,8 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
             state.startSync();
             state.enableTempSync();
 
-            // Get all tasks using the centralized getVaultTasks method
-            const tasks = await this.getVaultTasks();
+            // Get all tasks
+            const tasks = await this.taskParser?.getAllTasks() || [];
             console.log(`Found ${tasks.length} tasks to sync`);
 
             // Get all Obsidian events from calendar
@@ -953,7 +948,50 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
         }
     }
 
+    private isTaskFile(file: TAbstractFile): boolean {
+        // First check if it's a markdown file
+        if (!(file instanceof TFile) || !file.extension.toLowerCase().endsWith('md')) {
+            return false;
+        }
 
+        // If no included folders specified, all markdown files are task files
+        if (!this.settings.includeFolders || this.settings.includeFolders.length === 0) {
+            return true;
+        }
+
+        // Get the include settings
+        const includeSettings = this.settings.includeFolders;
+
+        // Check for direct file match
+        if (includeSettings.some(path => path === file.path)) {
+            return true;
+        }
+
+        // Check if file is in included folders with strict matching
+        if (includeSettings.some(folder => {
+            // Skip if this is a direct file reference (likely ends with .md)
+            if (!folder.endsWith('/') && folder.includes('.')) {
+                return false;
+            }
+            return file.path.startsWith(folder + '/');
+        })) {
+            return true;
+        }
+
+        // Try more lenient matching (without requiring trailing slash)
+        if (includeSettings.some(folder => {
+            // Skip if this is a direct file reference
+            if (!folder.endsWith('/') && folder.includes('.')) {
+                return false;
+            }
+            const folderNoSlash = folder.endsWith('/') ? folder.slice(0, -1) : folder;
+            return file.path.startsWith(folderNoSlash + '/');
+        })) {
+            return true;
+        }
+
+        return false;
+    }
 
     /**
      * Checks if the current token is valid or renews it if needed.

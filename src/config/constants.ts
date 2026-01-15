@@ -27,10 +27,6 @@ export const TIMING = {
 
     // Request timeout
     REQUEST_TIMEOUT_MS: 30000,  // 30 second timeout for API requests
-
-    // File processing delays
-    FILE_PROCESSING_DELAY_MS: 20, // Delay between processing individual files
-    BATCH_PROCESSING_DELAY_MS: 100, // Delay between processing batches of files
 } as const;
 
 export const SYNC_CONSTANTS = {
@@ -69,9 +65,5 @@ export const LOG_LEVELS = {
     INFO: 'ℹ️',
     WARN: '⚠️',
     ERROR: '❌',
-    SUCCESS: '✅',
-    IN_PROGRESS: '🚧',
-    CANCELLED: '🚫',
-    DEFERRED: '⏩',
-    IMPORTANT: '🔥'
+    SUCCESS: '✅'
 } as const; 
