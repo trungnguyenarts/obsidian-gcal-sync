@@ -55,8 +55,8 @@ export class SyncDateModal extends Modal {
 
                 // Process files
                 for (const file of files) {
-                    // Quick optimization: Check if file has been modified recently? No, safety first.
-                    const tasks = await this.plugin.taskParser.parseTasksFromFile(file);
+                    // CRITICAL: suppressEnqueue prevents the parser from auto-enqueueing tasks
+                    const tasks = await this.plugin.taskParser.parseTasksFromFile(file, { suppressEnqueue: true });
                     const tasksForDate = tasks.filter(t => t.id && t.date === date);
 
                     if (tasksForDate.length > 0) {

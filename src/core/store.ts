@@ -608,7 +608,8 @@ export const store = createStore<TaskStore>()(
                             try {
                                 const file = state.plugin.app.vault.getAbstractFileByPath(filePath);
                                 if (file instanceof TFile) {
-                                    const tasks = await state.plugin.taskParser.parseTasksFromFile(file);
+                                    // CRITICAL: suppressEnqueue to prevent side-effects during queue processing
+                                    const tasks = await state.plugin.taskParser.parseTasksFromFile(file, { suppressEnqueue: true });
                                     for (const task of tasks) {
                                         if (task.id && state.syncQueue.has(task.id)) {
                                             taskData.set(task.id, task);

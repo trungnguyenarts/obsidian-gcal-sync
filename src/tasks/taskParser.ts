@@ -91,7 +91,7 @@ export class TaskParser {
         return uniqueFiles;
     }
 
-    public async parseTasksFromFile(file: TFile): Promise<Task[]> {
+    public async parseTasksFromFile(file: TFile, options?: { suppressEnqueue?: boolean }): Promise<Task[]> {
         const { isSyncAllowed } = useStore.getState();
         if (!isSyncAllowed()) {
             LogUtils.debug('Sync is disabled, skipping task parsing');
@@ -163,7 +163,7 @@ export class TaskParser {
                             ? `${taskHeader}\n${taskContent}`
                             : taskHeader;
 
-                        const task = await this.parseTask(fullTaskContent, file.path);
+                        const task = await this.parseTask(fullTaskContent, file.path, { suppressEnqueue: options?.suppressEnqueue });
                         if (task) {
                             // Ensure task has the ID from the header
                             task.id = taskId;
@@ -207,7 +207,7 @@ export class TaskParser {
         return this.TASK_PATTERN.test(trimmedLine) && this.TIME_PATTERN.test(trimmedLine);
     }
 
-    public async parseTask(line: string, filePath?: string): Promise<Task | null> {
+    public async parseTask(line: string, filePath?: string, options?: { suppressEnqueue?: boolean }): Promise<Task | null> {
         try {
             // Split the full content into primary task line and sub-lines
             const linesContent = line.split('\n');
@@ -370,8 +370,8 @@ export class TaskParser {
                                 completedDate: updatedMetadata.completedDate
                             };
 
-                            // Ensure task is properly enqueued for sync
-                            if (state.isSyncAllowed()) {
+                            // Ensure task is properly enqueued for sync (unless suppressed)
+                            if (state.isSyncAllowed() && !options?.suppressEnqueue) {
                                 LogUtils.debug(`Enqueueing changed task ${id} for sync`);
                                 // Pass the freshTask to ensure it contains all changes
                                 await state.enqueueTasks([freshTask]);
@@ -607,7 +607,7 @@ export class TaskParser {
         cleaned = cleaned.replace(this.TIME_PATTERN, '').trim();
         cleaned = cleaned.replace(this.END_TIME_PATTERN, '').trim();
         cleaned = cleaned.replace(this.REMINDER_PATTERN, '').trim();
-        
+
         // Remove the ID with better spacing handling
         cleaned = cleaned.replace(/<!--\s*task-id:\s*[a-z0-9]+\s*-->/, '').trim();
         // Remove color ID pattern
@@ -624,7 +624,7 @@ export class TaskParser {
         cleaned = cleaned.replace(/[⏫🔼🔽🔺⏬]/g, '').trim();
         cleaned = cleaned.replace(/🆔\s*[^\s]+/g, '').trim();
         cleaned = cleaned.replace(/[⛔❌➕⏩]\s*[^\s]+/g, '').trim();
-        
+
         // Remove standalone dates that weren't caught by emoji patterns
         cleaned = cleaned.replace(/\b\d{4}-\d{2}-\d{2}\b/g, '').trim();
 
@@ -656,7 +656,7 @@ export class TaskParser {
         header = header.replace(this.TIME_PATTERN, '').trim();
         header = header.replace(this.END_TIME_PATTERN, '').trim();
         header = header.replace(this.REMINDER_PATTERN, '').trim();
-        
+
         // Remove the ID with better spacing handling
         header = header.replace(/<!--\s*task-id:\s*[a-z0-9]+\s*-->/, '').trim();
         // Remove color ID pattern
@@ -680,7 +680,7 @@ export class TaskParser {
         // This pattern matches: emoji + optional space + any non-whitespace characters
         header = header.replace(/🆔\s*[^\s]+/g, '').trim();
         header = header.replace(/[⛔❌➕⏩]\s*[^\s]+/g, '').trim();
-        
+
         // Remove standalone dates that weren't caught by emoji patterns
         header = header.replace(/\b\d{4}-\d{2}-\d{2}\b/g, '').trim();
 

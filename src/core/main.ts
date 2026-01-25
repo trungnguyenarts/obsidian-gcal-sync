@@ -344,7 +344,8 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
                             try {
                                 state.enableTempSync();
                                 state.startSync();
-                                const tasks = await this.taskParser.parseTasksFromFile(file);
+                                // CRITICAL: suppressEnqueue to respect filter below
+                                const tasks = await this.taskParser.parseTasksFromFile(file, { suppressEnqueue: true });
 
                                 // Filter based on sync window if enabled
                                 const { syncWindowEnabled, syncWindowDays } = this.settings;
@@ -804,10 +805,11 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
         switch (state.status) {
             case 'connected':
                 if (state.syncInProgress) {
-                    text = '🔄 GCal: Syncing...';
-                    tooltip = `Syncing tasks with Google Calendar (${state.syncQueue.size} remaining)`;
+                    const count = state.syncQueue.size + state.processingTasks.size;
+                    text = `🔄 Syncing (${count})...`;
+                    tooltip = `Syncing tasks with Google Calendar (${count} remaining)`;
                 } else {
-                    text = state.syncEnabled ? '🟢 GCal: Auto-sync On' : '🟡 GCal: Ready';
+                    text = state.syncEnabled ? '🟢 GCal: Auto' : '🟡 GCal: Ready';
                     tooltip = state.syncEnabled ? 'Auto-sync is enabled' : 'Auto-sync is paused';
                     if (state.lastSyncTime) {
                         tooltip += ` (Last sync: ${new Date(state.lastSyncTime).toLocaleTimeString()})`;
@@ -815,8 +817,9 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
                 }
                 break;
             case 'syncing':
-                text = '🔄 GCal: Syncing...';
-                tooltip = `Syncing tasks with Google Calendar (${state.syncQueue.size} remaining)`;
+                const count = state.syncQueue.size + state.processingTasks.size;
+                text = `🔄 Syncing (${count})...`;
+                tooltip = `Syncing tasks with Google Calendar (${count} remaining)`;
                 break;
             case 'disconnected':
                 text = '⚪ GCal: Disconnected';
@@ -952,19 +955,35 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
                 const files = await this.repairManager.getMarkdownFiles();
                 let taskCount = 0;
 
-                const { syncWindowEnabled, syncWindowDays } = this.settings;
-                const windowDays = syncWindowDays ?? 7;
+                const { syncWindowDays } = this.settings;
+                // Force default to true if undefined
+                const syncWindowEnabled = this.settings.syncWindowEnabled ?? true;
+                // Force number type
+                const windowDays = Number(syncWindowDays) || 7;
+
+                console.log(`[Sync Window] Enabled: ${syncWindowEnabled}, Days: ${windowDays} (original: ${syncWindowDays})`);
 
                 // Process files
                 for (const file of files) {
-                    const tasks = await this.taskParser.parseTasksFromFile(file);
+                    // CRITICAL: suppressEnqueue prevents the parser from auto-enqueueing tasks
+                    // This ensures the sync window filter is the ONLY gate for which tasks get synced
+                    const tasks = await this.taskParser.parseTasksFromFile(file, { suppressEnqueue: true });
 
                     const tasksToSync = tasks.filter(t => {
                         if (!t?.id) return false;
 
                         if (syncWindowEnabled) {
-                            if (!t.date) return false; // STRICT: No date = No sync in window mode
-                            return TimeUtils.isDateInWindow(t.date, windowDays);
+                            if (!t.date) {
+                                // STRICT: No date = No sync in window mode
+                                return false;
+                            }
+                            const inWindow = TimeUtils.isDateInWindow(t.date, windowDays);
+                            if (!inWindow) {
+                                console.log(`[Sync Window] REJECT: ${t.id} (${t.date}) - Outside window`);
+                                return false;
+                            }
+                            console.log(`[Sync Window] ACCEPT: ${t.id} (${t.date}) - Inside window`);
+                            return true;
                         }
                         return true;
                     });
