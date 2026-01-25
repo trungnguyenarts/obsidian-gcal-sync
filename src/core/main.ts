@@ -549,7 +549,7 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
                     state.invalidateFileCache(file.path);
                     await new Promise(resolve => setTimeout(resolve, TIMING.FILE_PROCESSING_DELAY_MS)); // e.g., 20ms
 
-                    const fileTasks = await this.taskParser.parseTasksFromFile(file);
+                    const fileTasks = await this.taskParser.parseTasksFromFile(file, { suppressEnqueue: true });
                     if (fileTasks.length > 0) {
                         LogUtils.debug(`getVaultTasks: Found ${fileTasks.length} tasks in ${file.path}`);
                         tasks.push(...fileTasks);

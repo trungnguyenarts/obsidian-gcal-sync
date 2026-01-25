@@ -561,7 +561,7 @@ export class RepairManager {
                     await new Promise(resolve => setTimeout(resolve, 20));
 
                     // Parse tasks from this file
-                    const fileTasks = await this.plugin.taskParser.parseTasksFromFile(file);
+                    const fileTasks = await this.plugin.taskParser.parseTasksFromFile(file, { suppressEnqueue: true });
 
                     // Add tasks with IDs to our collection
                     for (const task of fileTasks) {

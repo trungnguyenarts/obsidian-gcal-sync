@@ -550,7 +550,7 @@ export class TaskParser {
 
                     for (const file of fileBatch) {
                         try {
-                            const fileTasks = await this.parseTasksFromFile(file);
+                            const fileTasks = await this.parseTasksFromFile(file, { suppressEnqueue: true });
                             tasks.push(...fileTasks);
                         } catch (error) {
                             LogUtils.error(`Failed to parse tasks from file ${file.path}: ${error}`);
@@ -566,7 +566,7 @@ export class TaskParser {
                 // Process all files at once on desktop
                 for (const file of files) {
                     try {
-                        const fileTasks = await this.parseTasksFromFile(file);
+                        const fileTasks = await this.parseTasksFromFile(file, { suppressEnqueue: true });
                         tasks.push(...fileTasks);
                     } catch (error) {
                         LogUtils.error(`Failed to parse tasks from file ${file.path}: ${error}`);
@@ -878,7 +878,7 @@ export class TaskParser {
                 const file = this.plugin.app.vault.getAbstractFileByPath(metadata.filePath);
                 if (file instanceof TFile) {
                     // Parse all tasks from this specific file
-                    const tasks = await this.parseTasksFromFile(file);
+                    const tasks = await this.parseTasksFromFile(file, { suppressEnqueue: true });
                     const task = tasks.find(t => t.id === taskId);
                     if (task) {
                         return task;
@@ -898,7 +898,7 @@ export class TaskParser {
                 const state = useStore.getState();
                 state.invalidateFileCache(file.path);
 
-                const tasks = await this.parseTasksFromFile(file);
+                const tasks = await this.parseTasksFromFile(file, { suppressEnqueue: true });
                 const task = tasks.find(t => t.id === taskId);
                 if (task) {
                     return task;
