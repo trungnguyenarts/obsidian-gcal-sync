@@ -275,7 +275,13 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
                             if (task && task.id) {
                                 // Check sync window if enabled
                                 const { syncWindowEnabled, syncWindowDays } = this.settings;
-                                if (syncWindowEnabled && !!task.date) { // Only check if date exists
+
+                                if (syncWindowEnabled) {
+                                    if (!task.date) {
+                                        // Skip tasks without dates when in window mode
+                                        LogUtils.debug(`Skipping task ${task.id} - no date and sync window enabled`);
+                                        continue;
+                                    }
                                     const inWindow = TimeUtils.isDateInWindow(task.date, syncWindowDays ?? 7);
                                     if (!inWindow) {
                                         LogUtils.debug(`Skipping task ${task.id} (date: ${task.date}) - outside sync window`);
@@ -344,7 +350,9 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
                                 const { syncWindowEnabled, syncWindowDays } = this.settings;
                                 const tasksToSync = tasks.filter(t => {
                                     if (!t?.id) return false;
-                                    if (syncWindowEnabled && !!t.date) {
+
+                                    if (syncWindowEnabled) {
+                                        if (!t.date) return false; // Skip no-date tasks in window mode
                                         return TimeUtils.isDateInWindow(t.date, syncWindowDays ?? 7);
                                     }
                                     return true;
@@ -434,7 +442,12 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
                 if (task && task.id) {
                     // Check sync window if enabled
                     const { syncWindowEnabled, syncWindowDays } = this.settings;
-                    if (syncWindowEnabled && !!task.date) {
+
+                    if (syncWindowEnabled) {
+                        if (!task.date) {
+                            LogUtils.debug(`Skipping task ${task.id} - no date and sync window enabled`);
+                            return;
+                        }
                         const inWindow = TimeUtils.isDateInWindow(task.date, syncWindowDays ?? 7);
                         if (!inWindow) {
                             LogUtils.debug(`Skipping task ${task.id} (date: ${task.date}) - outside sync window`);
@@ -948,7 +961,9 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
 
                     const tasksToSync = tasks.filter(t => {
                         if (!t?.id) return false;
-                        if (syncWindowEnabled && !!t.date) {
+
+                        if (syncWindowEnabled) {
+                            if (!t.date) return false; // STRICT: No date = No sync in window mode
                             return TimeUtils.isDateInWindow(t.date, windowDays);
                         }
                         return true;
