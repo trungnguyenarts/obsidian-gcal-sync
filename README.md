@@ -57,7 +57,7 @@ To sync a task, use the following standardized format:
 ### Date & Time Formats
 *   `📅 YYYY-MM-DD`: Task date.
 *   `⏰ HH:MM`: Start time.
-*   `- HH:MM`: End time. (Sử dụng dấu `-` để tương thích tốt nhất với giao diện Timeline của Obsidian Calendar plugin).
+*   `- HH:MM`: End time. (Use `-` for best compatibility with the Obsidian Calendar plugin's Timeline view).
 *   `🔔 30m / 🔔 2h / 🔔 1d`: Reminder offset.
 
 ### Color Mapping (Numerical)
