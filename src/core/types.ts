@@ -85,6 +85,8 @@ export interface GoogleCalendarSettings {
     customClientSecret?: string;
     calendarId?: string;
     secretICalAddress?: string;
+    syncWindowDays?: number; // Number of days +/- for auto/manual sync (default: 7)
+    syncWindowEnabled?: boolean; // Whether to strict window based syncing (default: true)
 }
 
 export interface Pos {

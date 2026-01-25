@@ -51,4 +51,27 @@ export class TimeUtils {
         const date = new Date();
         return date.toTimeString().slice(0, 5);
     }
+
+    /**
+     * Checks if a target date is within a window around a center date
+     * @param targetDateStr YYYY-MM-DD string
+     * @param windowDays Number of days (+/-)
+     * @param centerDate Optional center date (default: today)
+     */
+    static isDateInWindow(targetDateStr: string, windowDays: number, centerDate: Date = new Date()): boolean {
+        if (!this.isValidDate(targetDateStr)) return false;
+
+        const target = new Date(targetDateStr);
+        // Reset times to compare dates only
+        target.setHours(0, 0, 0, 0);
+        const start = new Date(centerDate);
+        start.setHours(0, 0, 0, 0);
+        start.setDate(start.getDate() - windowDays);
+
+        const end = new Date(centerDate);
+        end.setHours(0, 0, 0, 0);
+        end.setDate(end.getDate() + windowDays);
+
+        return target >= start && target <= end;
+    }
 } 

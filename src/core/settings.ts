@@ -21,6 +21,8 @@ export const DEFAULT_SETTINGS: GoogleCalendarSettings = {
     customClientSecret: '',
     calendarId: 'primary',
     secretICalAddress: '',
+    syncWindowDays: 7,
+    syncWindowEnabled: true,
 };
 
 export class GoogleCalendarSettingsTab extends PluginSettingTab {
@@ -65,6 +67,32 @@ export class GoogleCalendarSettingsTab extends PluginSettingTab {
                         .map(folder => folder.trim())
                         .filter(folder => folder.length > 0);
                     await this.plugin.saveSettings();
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Sync Window')
+            .setDesc('Only sync tasks within a specific window of days around today.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.syncWindowEnabled ?? true)
+                .onChange(async (value) => {
+                    this.plugin.settings.syncWindowEnabled = value;
+                    await this.plugin.saveSettings();
+                    // Force refresh of views if needed?
+                }));
+
+        new Setting(containerEl)
+            .setName('Sync Window Range (+/- Days)')
+            .setDesc('Number of days before and after today to include in frequent syncs (default: 7). This prevents syncing your entire history every time.')
+            .addText(text => text
+                .setPlaceholder('7')
+                .setValue((this.plugin.settings.syncWindowDays ?? 7).toString())
+                .onChange(async (value) => {
+                    const days = parseInt(value);
+                    if (!isNaN(days) && days >= 0) {
+                        this.plugin.settings.syncWindowDays = days;
+                        await this.plugin.saveSettings();
+                    }
                 }));
 
         // Calendar Settings Section

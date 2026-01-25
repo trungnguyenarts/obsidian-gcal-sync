@@ -13,8 +13,11 @@ import { MetadataManager } from '../metadata/metadataManager';
 import { TokenController } from '../tasks/TokenController';
 import { LogUtils } from '../utils/logUtils';
 import { hasTaskChanged } from '../utils/taskUtils';
+import { TimeUtils } from '../utils/timeUtils';
 import { initializeStore } from './store';
 import { Platform } from 'obsidian';
+import { RepairModal } from '../ui/RepairModal';
+import { SyncDateModal } from '../ui/SyncDateModal';
 
 export default class GoogleCalendarSyncPlugin extends Plugin {
     settings: GoogleCalendarSettings;
@@ -24,6 +27,7 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
     public repairManager: RepairManager | null = null;
     public taskParser: TaskParser;
     public tokenController: TokenController;
+    public get store() { return useStore; }
     private statusBarItem: HTMLElement | null = null;
     private ribbonIcon: HTMLElement | null = null;
     private unsubscribeStore: (() => void) | undefined = undefined;
@@ -269,6 +273,15 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
                         for (const line of taskLines) {
                             const task = await this.taskParser.parseTask(line, file.path);
                             if (task && task.id) {
+                                // Check sync window if enabled
+                                const { syncWindowEnabled, syncWindowDays } = this.settings;
+                                if (syncWindowEnabled && !!task.date) { // Only check if date exists
+                                    const inWindow = TimeUtils.isDateInWindow(task.date, syncWindowDays ?? 7);
+                                    if (!inWindow) {
+                                        LogUtils.debug(`Skipping task ${task.id} (date: ${task.date}) - outside sync window`);
+                                        continue;
+                                    }
+                                }
                                 tasks.push(task);
                             }
                         }
@@ -326,7 +339,18 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
                                 state.enableTempSync();
                                 state.startSync();
                                 const tasks = await this.taskParser.parseTasksFromFile(file);
-                                await state.enqueueTasks(tasks.filter(t => t?.id));
+
+                                // Filter based on sync window if enabled
+                                const { syncWindowEnabled, syncWindowDays } = this.settings;
+                                const tasksToSync = tasks.filter(t => {
+                                    if (!t?.id) return false;
+                                    if (syncWindowEnabled && !!t.date) {
+                                        return TimeUtils.isDateInWindow(t.date, syncWindowDays ?? 7);
+                                    }
+                                    return true;
+                                });
+
+                                await state.enqueueTasks(tasksToSync);
                                 await state.processSyncQueueNow();
                                 state.endSync(true);
                                 new Notice('Tasks synced with Google Calendar');
@@ -408,6 +432,16 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
                 const task = await this.taskParser.parseTask(currentLine, file.path);
 
                 if (task && task.id) {
+                    // Check sync window if enabled
+                    const { syncWindowEnabled, syncWindowDays } = this.settings;
+                    if (syncWindowEnabled && !!task.date) {
+                        const inWindow = TimeUtils.isDateInWindow(task.date, syncWindowDays ?? 7);
+                        if (!inWindow) {
+                            LogUtils.debug(`Skipping task ${task.id} (date: ${task.date}) - outside sync window`);
+                            return;
+                        }
+                    }
+
                     // Get metadata to check if task has changed
                     const metadata = this.settings.taskMetadata[task.id];
                     const result = hasTaskChanged(task, metadata, task.id);
@@ -809,12 +843,42 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
     private showSyncMenu(event: MouseEvent) {
         const menu = new Menu();
 
-        menu.addItem((item: MenuItem) => {
-            item
-                .setTitle("Sync Now")
-                .setIcon("sync")
-                .onClick(() => this.syncAllTasks());
+        // Status Indicator
+        menu.addItem((item) => {
+            item.setTitle('✅ Options')
+                .setDisabled(true);
         });
+
+        menu.addSeparator();
+
+        // Sync Now (Windowed)
+        menu.addItem((item) => {
+            item.setTitle(`🔄 Sync Now (${this.settings.syncWindowEnabled ? this.settings.syncWindowDays + ' days' : 'All'})`)
+                .setIcon('refresh-cw')
+                .onClick(async () => {
+                    await this.scanAndSyncWindowed();
+                });
+        });
+
+        // Sync Specific Date
+        menu.addItem((item) => {
+            item.setTitle('📅 Sync Specific Date')
+                .setIcon('calendar')
+                .onClick(() => {
+                    new SyncDateModal(this.app, this).open();
+                });
+        });
+
+        // Repair
+        menu.addItem((item) => {
+            item.setTitle('🔧 Repair & Resync All')
+                .setIcon('wrench')
+                .onClick(() => {
+                    new RepairModal(this.app, this).open();
+                });
+        });
+
+        menu.addSeparator();
 
         menu.addItem((item: MenuItem) => {
             const syncEnabled = useStore.getState().syncEnabled;
@@ -824,7 +888,6 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
                 .onClick(async () => {
                     const newState = !syncEnabled;
                     useStore.getState().setSyncEnabled(newState);
-                    // Update plugin settings
                     this.settings.syncEnabled = newState;
                     await this.saveSettings();
                     this.updateStatusBar();
@@ -832,25 +895,13 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
                 });
         });
 
-        menu.addItem((item: MenuItem) => {
-            item
-                .setTitle("Repair Calendar Sync")
-                .setIcon("tool")
+        // Quick Toggle Sync Window
+        menu.addItem((item) => {
+            item.setTitle('Limit Sync to Window')
+                .setChecked(this.settings.syncWindowEnabled ?? true)
                 .onClick(async () => {
-                    if (!this.repairManager) {
-                        new Notice('Repair manager not initialized');
-                        return;
-                    }
-                    try {
-                        new Notice('Starting repair process...');
-                        await this.repairManager.repairSyncState(
-                            (progress) => console.log(`Repair progress: ${progress.phase} - ${progress.processedItems}/${progress.totalItems}`)
-                        );
-                        new Notice('Repair completed successfully');
-                    } catch (error) {
-                        console.error('Repair failed:', error);
-                        new Notice('Repair failed. Check console for details.');
-                    }
+                    this.settings.syncWindowEnabled = !this.settings.syncWindowEnabled;
+                    await this.saveSettings();
                 });
         });
 
@@ -861,15 +912,67 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
                 .onClick(() => this.disconnectGoogle());
         });
 
-        // Show menu at the click position
-        menu.showAtPosition({
-            x: event.x,
-            y: event.y
+        // Settings
+        menu.addItem((item) => {
+            item.setTitle('⚙️ Sync Settings')
+                .setIcon('settings')
+                .onClick(() => {
+                    // @ts-ignore
+                    this.app.setting.open();
+                    // @ts-ignore
+                    this.app.setting.openTabById(this.manifest.id);
+                });
         });
+
+        menu.showAtMouseEvent(event);
     }
 
     async saveSettings() {
         await this.saveData(this.settings);
+    }
+
+    private async scanAndSyncWindowed() {
+        new Notice('Starting sync...');
+        const state = useStore.getState();
+        try {
+            if (this.repairManager) {
+                const files = await this.repairManager.getMarkdownFiles();
+                let taskCount = 0;
+
+                const { syncWindowEnabled, syncWindowDays } = this.settings;
+                const windowDays = syncWindowDays ?? 7;
+
+                // Process files
+                for (const file of files) {
+                    const tasks = await this.taskParser.parseTasksFromFile(file);
+
+                    const tasksToSync = tasks.filter(t => {
+                        if (!t?.id) return false;
+                        if (syncWindowEnabled && !!t.date) {
+                            return TimeUtils.isDateInWindow(t.date, windowDays);
+                        }
+                        return true;
+                    });
+
+                    if (tasksToSync.length > 0) {
+                        taskCount += tasksToSync.length;
+                        await state.enqueueTasks(tasksToSync);
+                    }
+                }
+
+                if (taskCount > 0) {
+                    await state.processSyncQueueNow();
+                    new Notice(`Queued ${taskCount} tasks for sync.`);
+                } else {
+                    new Notice(`No tasks found within the ${windowDays}-day window.`);
+                }
+            } else {
+                new Notice('Sync failed: Manager not initialized');
+            }
+        } catch (error) {
+            LogUtils.error('Error during manual sync:', error);
+            new Notice('Sync failed. Check logs.');
+        }
     }
 
     private async syncAllTasks() {
@@ -883,8 +986,13 @@ export default class GoogleCalendarSyncPlugin extends Plugin {
             state.startSync();
             state.enableTempSync();
 
-            // Get all tasks using the centralized getVaultTasks method
-            const tasks = await this.getVaultTasks();
+            // Get all tasks using RepairManager
+            if (!this.repairManager) {
+                console.error('Repair manager not available');
+                return;
+            }
+            const taskMap = await this.repairManager.getAllTasks();
+            const tasks = Array.from(taskMap.values());
             console.log(`Found ${tasks.length} tasks to sync`);
 
             // Get all Obsidian events from calendar
