@@ -173,16 +173,13 @@ export class RepairManager {
                     taskArray.forEach(task => {
                         if (!task.id) return;
                         
-                        // First check if task is completed
+                        // If task is completed, queue it for sync to update with ✅
                         if (task.completed) {
-                            // Completed tasks should have their events deleted
-                            if (eventsByTaskId.has(task.id)) {
-                                tasksToDelete.push(task);
-                                LogUtils.debug(`Task ${task.id} is completed, will delete associated event`);
-                            } else {
-                                // Already has no event, no action needed
-                                processed.add(task.id);
-                                LogUtils.debug(`Task ${task.id} is completed and has no event, no action needed`);
+                            // Enqueue for update, not deletion
+                            if (this.plugin.calendarSync) {
+                                // Use the syncTask logic to update the completed task
+                                store.enqueueTasks([task]);
+                                LogUtils.debug(`Task ${task.id} is completed, enqueued for update with ✅`);
                             }
                         } else {
                             // Not completed, normal event handling
@@ -195,37 +192,7 @@ export class RepairManager {
                         }
                     });
                     
-                    // First, delete events for completed tasks
-                    if (tasksToDelete.length > 0) {
-                        LogUtils.debug(`Deleting events for ${tasksToDelete.length} completed tasks`);
-                        
-                        for (const task of tasksToDelete) {
-                            if (!task.id) continue;
-                            
-                            try {
-                                // Get the event ID for this task
-                                const event = eventsByTaskId.get(task.id);
-                                if (event && this.plugin.calendarSync) {
-                                    // Delete the event
-                                    await this.plugin.calendarSync.deleteEvent(event.id, task.id);
-                                    LogUtils.debug(`Deleted event ${event.id} for completed task ${task.id}`);
-                                    
-                                    // Clean up metadata
-                                    if (this.plugin.settings.taskMetadata[task.id]) {
-                                        delete this.plugin.settings.taskMetadata[task.id];
-                                    }
-                                    
-                                    processed.add(task.id);
-                                }
-                            } catch (error) {
-                                LogUtils.error(`Failed to delete event for task ${task.id}:`, error);
-                                errors.set(task.id, error instanceof Error ? error : new Error(String(error)));
-                            }
-                        }
-                        
-                        // Save settings after batch processing
-                        await this.plugin.saveSettings();
-                    }
+
                     
                     // Next, explicitly create events for tasks without them
                     let processedCount = 0;
@@ -378,55 +345,87 @@ export class RepairManager {
             // Process each task ID
             for (const [taskId, events] of eventsByTaskId) {
                 try {
-                    // If task ID doesn't exist in Obsidian, delete all its events
-                    if (!activeTaskIds.has(taskId)) {
-                        LogUtils.debug(`Task ${taskId} not found in Obsidian, deleting ${events.length} events`);
-                        let allDeletesSucceeded = true;
-                        for (const event of events) {
-                            try {
-                                await this.plugin.calendarSync?.deleteEvent(event.id, taskId);
-                                LogUtils.debug(`Deleted orphaned event ${event.id} for task ${taskId}`);
-                            } catch (error) {
-                                LogUtils.error(`Failed to delete orphaned event ${event.id}:`, error);
-                                allDeletesSucceeded = false;
+                    const taskMetadata = this.plugin.settings.taskMetadata[taskId];
+                    const gracePeriodMs = this.plugin.settings.deletionGracePeriodMs ?? 300000; // Default to 5 minutes
+
+                    if (activeTaskIds.has(taskId)) {
+                        // Task found, clear pending deletion status if any
+                        if (taskMetadata?.pendingDeletionTimestamp) {
+                            LogUtils.debug(`Task ${taskId} found, clearing pending deletion status.`);
+                            taskMetadata.pendingDeletionTimestamp = undefined;
+                            await this.plugin.saveSettings();
+                        }
+                        // Move duplicate event handling here, as it only applies to active tasks
+                        if (events.length > 1) {
+                            // If multiple events exist for same task, keep only the most recent
+                            const sortedEvents = events.sort((a, b) =>
+                                (new Date(b.updated || 0)).getTime() - (new Date(a.updated || 0)).getTime()
+                            );
+
+                            // Delete all but the most recent event
+                            for (let i = 1; i < sortedEvents.length; i++) {
+                                try {
+                                    await this.plugin.calendarSync?.deleteEvent(sortedEvents[i].id, taskId);
+                                    LogUtils.debug(`Deleted duplicate event ${sortedEvents[i].id} for task ${taskId}`);
+                                } catch (error) {
+                                    LogUtils.error(`Failed to delete duplicate event ${sortedEvents[i].id}:`, error);
+                                }
+                            }
+
+                            // Update metadata to point to the most recent event
+                            const updatedMetadata = this.plugin.settings.taskMetadata[taskId]; // Re-fetch in case it was just cleared
+                            if (updatedMetadata) {
+                                this.plugin.settings.taskMetadata[taskId] = {
+                                    ...updatedMetadata,
+                                    eventId: sortedEvents[0].id
+                                };
+                                await this.plugin.saveSettings();
                             }
                         }
-
-                        // Only clean up metadata if ALL event deletions succeeded
-                        if (allDeletesSucceeded && this.plugin.settings.taskMetadata[taskId]) {
-                            delete this.plugin.settings.taskMetadata[taskId];
-                            await this.plugin.saveSettings();
-                            LogUtils.debug(`Deleted metadata for orphaned task ${taskId}`);
-                        } else if (!allDeletesSucceeded) {
-                            LogUtils.warn(`Keeping metadata for task ${taskId} - some event deletions failed`);
-                        }
-                    } else if (events.length > 1) {
-                        // If multiple events exist for same task, keep only the most recent
-                        const sortedEvents = events.sort((a, b) =>
-                            (new Date(b.updated || 0)).getTime() - (new Date(a.updated || 0)).getTime()
-                        );
-
-                        // Delete all but the most recent event
-                        for (let i = 1; i < sortedEvents.length; i++) {
-                            try {
-                                await this.plugin.calendarSync?.deleteEvent(sortedEvents[i].id, taskId);
-                                LogUtils.debug(`Deleted duplicate event ${sortedEvents[i].id} for task ${taskId}`);
-                            } catch (error) {
-                                LogUtils.error(`Failed to delete duplicate event ${sortedEvents[i].id}:`, error);
+                    } else {
+                        // Task not found in activeTaskIds, consider for pending deletion or actual deletion
+                        if (taskMetadata) { // Only process if metadata exists for this taskId
+                            if (!taskMetadata.pendingDeletionTimestamp) {
+                                // First time this task is observed as missing, mark for pending deletion
+                                LogUtils.debug(`Task ${taskId} not found. Marking for pending deletion.`);
+                                taskMetadata.pendingDeletionTimestamp = Date.now();
+                                await this.plugin.saveSettings();
+                            } else {
+                                // Task has been missing before, check grace period
+                                const timeSincePending = Date.now() - taskMetadata.pendingDeletionTimestamp;
+                                if (timeSincePending >= gracePeriodMs) {
+                                    // Grace period expired, proceed with deletion
+                                    LogUtils.debug(`Task ${taskId} still not found after grace period of ${gracePeriodMs}ms. Deleting ${events.length} events.`);
+                                    for (const event of events) {
+                                        try {
+                                            await this.plugin.calendarSync?.deleteEvent(event.id, taskId);
+                                            LogUtils.debug(`Deleted orphaned event ${event.id} for task ${taskId}`);
+                                        } catch (error) {
+                                            LogUtils.error(`Failed to delete orphaned event ${event.id}:`, error);
+                                        }
+                                    }
+                                    // Clean up metadata
+                                    delete this.plugin.settings.taskMetadata[taskId];
+                                    await this.plugin.saveSettings();
+                                } else {
+                                    // Still within grace period
+                                    LogUtils.debug(`Task ${taskId} still not found, but within grace period. Pending deletion for ${Math.round((gracePeriodMs - timeSincePending) / 1000)}s.`);
+                                }
                             }
-                        }
-
-                        // Update metadata to point to the most recent event
-                        const metadata = this.plugin.settings.taskMetadata[taskId];
-                        if (metadata) {
-                            this.plugin.settings.taskMetadata[taskId] = {
-                                ...metadata,
-                                eventId: sortedEvents[0].id
-                            };
-                            await this.plugin.saveSettings();
+                        } else {
+                            // This case should ideally not happen if a calendar event exists but no metadata,
+                            // but as a fallback, if there's no metadata, and the task isn't active, delete the events.
+                            LogUtils.warn(`No metadata found for task ${taskId} (associated with calendar events). Deleting events immediately.`);
+                            for (const event of events) {
+                                try {
+                                    await this.plugin.calendarSync?.deleteEvent(event.id, taskId);
+                                    LogUtils.debug(`Deleted orphaned event ${event.id} for task ${taskId} due to no metadata.`);
+                                } catch (error) {
+                                    LogUtils.error(`Failed to delete orphaned event ${event.id} due to no metadata:`, error);
+                                }
+                            }
                         }
                     }
-
                     processedItems += events.length;
                     if (progressCallback) {
                         progressCallback({
@@ -443,7 +442,7 @@ export class RepairManager {
                 } catch (error) {
                     LogUtils.error(`Failed to process events for task ${taskId}:`, error);
                 }
-            }
+            } // This curly brace now correctly closes the 'for' loop body
 
             LogUtils.debug('Completed orphaned events cleanup');
         } catch (error) {
@@ -457,30 +456,58 @@ export class RepairManager {
         progressCallback?: (progress: RepairProgress) => void
     ): Promise<void> {
         try {
-            LogUtils.debug('Starting orphaned metadata cleanup');
+            LogUtils.debug(`Starting orphaned metadata cleanup. Active task IDs received: ${activeTaskIds.size}`);
             const metadata = this.plugin.settings.taskMetadata;
-            const totalItems = Object.keys(metadata).length;
+            const initialMetadataCount = Object.keys(metadata).length;
+            LogUtils.debug(`Initial metadata entries: ${initialMetadataCount}`);
             let processedItems = 0;
+            let deletionCandidates = 0;
+            let actualDeletions = 0;
 
             for (const [taskId, taskMetadata] of Object.entries(metadata)) {
                 try {
-                    if (!activeTaskIds.has(taskId)) {
-                        // If event still exists, delete it first
-                        if (taskMetadata.eventId) {
-                            try {
-                                await this.plugin.calendarSync?.deleteEvent(taskMetadata.eventId, taskId);
-                                LogUtils.debug(`Deleted orphaned event ${taskMetadata.eventId} for task ${taskId}`);
-                                // Only delete metadata after successful event deletion
+                    const gracePeriodMs = this.plugin.settings.deletionGracePeriodMs ?? 300000; // Default 5 minutes
+
+                    if (activeTaskIds.has(taskId)) {
+                        // Task found, clear pending deletion status if any
+                        if (taskMetadata.pendingDeletionTimestamp) {
+                            LogUtils.debug(`Metadata for task ${taskId} found (was pending deletion), clearing pending deletion status.`);
+                            taskMetadata.pendingDeletionTimestamp = undefined;
+                            await this.plugin.saveSettings();
+                        }
+                    } else {
+                        // Task not found in activeTaskIds
+                        LogUtils.debug(`Metadata for task ${taskId} is not in activeTaskIds.`);
+                        deletionCandidates++;
+                        if (!taskMetadata.pendingDeletionTimestamp) {
+                            // First time this metadata is observed as orphaned, mark for pending deletion
+                            LogUtils.debug(`Metadata for task ${taskId} orphaned. Marking for pending deletion. Event ID: ${taskMetadata.eventId || 'N/A'}`);
+                            taskMetadata.pendingDeletionTimestamp = Date.now();
+                            await this.plugin.saveSettings();
+                        } else {
+                            // Metadata has been orphaned before, check grace period
+                            const timeSincePending = Date.now() - taskMetadata.pendingDeletionTimestamp;
+                            if (timeSincePending >= gracePeriodMs) {
+                                // Grace period expired, proceed with deletion
+                                LogUtils.warn(`Metadata for task ${taskId} still orphaned after grace period of ${gracePeriodMs}ms. Deleting metadata and associated event. Event ID: ${taskMetadata.eventId || 'N/A'}`);
+                                actualDeletions++;
+                                // If event still exists, delete it first
+                                if (taskMetadata.eventId) {
+                                    try {
+                                        await this.plugin.calendarSync?.deleteEvent(taskMetadata.eventId, taskId);
+                                        LogUtils.debug(`Deleted orphaned event ${taskMetadata.eventId} for task ${taskId}`);
+                                    } catch (error) {
+                                        LogUtils.error(`Failed to delete orphaned event ${taskMetadata.eventId}:`, error);
+                                    }
+                                }
+
+                                // Delete metadata
                                 delete metadata[taskId];
                                 LogUtils.debug(`Deleted orphaned metadata for task ${taskId}`);
-                            } catch (error) {
-                                LogUtils.error(`Failed to delete orphaned event ${taskMetadata.eventId}:`, error);
-                                // Keep metadata for retry - don't delete it
+                            } else {
+                                // Still within grace period
+                                LogUtils.debug(`Metadata for task ${taskId} still orphaned, but within grace period. Pending deletion for ${Math.round((gracePeriodMs - timeSincePending) / 1000)}s. Event ID: ${taskMetadata.eventId || 'N/A'}`);
                             }
-                        } else {
-                            // No event to delete, safe to remove metadata
-                            delete metadata[taskId];
-                            LogUtils.debug(`Deleted orphaned metadata for task ${taskId} (no event)`);
                         }
                     }
 
@@ -489,7 +516,7 @@ export class RepairManager {
                         progressCallback({
                             phase: RepairPhases.metadata,
                             processedItems,
-                            totalItems,
+                            totalItems: initialMetadataCount, // Use initial count for total
                             currentOperation: RepairOperations.CLEANUP_METADATA,
                             failedItems: [],
                             retryCount: 0,
@@ -503,7 +530,7 @@ export class RepairManager {
             }
 
             await this.plugin.saveSettings();
-            LogUtils.debug('Completed orphaned metadata cleanup');
+            LogUtils.debug(`Completed orphaned metadata cleanup. Processed ${processedItems} metadata entries, ${deletionCandidates} deletion candidates, ${actualDeletions} actual deletions.`);
         } catch (error) {
             LogUtils.error('Failed to cleanup orphaned metadata:', error);
             throw error;
@@ -575,7 +602,7 @@ export class RepairManager {
         }
     }
 
-    private async getMarkdownFiles(): Promise<TFile[]> {
+    public async getMarkdownFiles(): Promise<TFile[]> {
         // Get all markdown files in the vault
         const allFiles = this.plugin.app.vault.getMarkdownFiles();
         LogUtils.debug(`Found ${allFiles.length} total markdown files in vault`);

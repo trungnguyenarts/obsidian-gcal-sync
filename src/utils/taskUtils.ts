@@ -21,6 +21,7 @@ export function hasTaskChanged(task: Task, metadata?: TaskMetadata, taskId?: str
         reminder: boolean;
         completed: boolean;
         filePath: boolean;
+        colorId: boolean;
     };
 } {
     // If no metadata exists, task has changed
@@ -48,7 +49,8 @@ export function hasTaskChanged(task: Task, metadata?: TaskMetadata, taskId?: str
                 endTime: false,
                 reminder: false,
                 completed: true,
-                filePath: false
+                filePath: false,
+                colorId: false
             }
         };
     }
@@ -65,7 +67,8 @@ export function hasTaskChanged(task: Task, metadata?: TaskMetadata, taskId?: str
         endTime: task.endTime !== metadata.endTime,
         reminder: task.reminder !== metadata.reminder && (task.reminder !== undefined || metadata.reminder !== undefined),
         completed: task.completed !== metadata.completed,
-        filePath: !!task.filePath && metadata.filePath !== task.filePath // Track file moves
+        filePath: !!task.filePath && metadata.filePath !== task.filePath, // Track file moves
+        colorId: task.colorId !== metadata.colorId
     };
 
     const hasChanged = Object.values(changes).some(change => change);

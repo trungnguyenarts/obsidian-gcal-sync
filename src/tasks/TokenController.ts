@@ -68,41 +68,67 @@ export class TokenController {
         )
 
         // Handle file modifications
-        this.plugin.registerEvent(
-            this.plugin.app.vault.on('modify', async (file: TFile) => {
-                if (this.modifyLock) return
-
-                try {
-                    this.modifyLock = true
-                    const content = await this.plugin.app.vault.read(file)
-                    const currentIds = new Set(
-                        Array.from(content.matchAll(this.ID_PATTERN))
-                            .map(match => match[1])
-                    )
-
-                    let changed = false
-                    // Only remove IDs that no longer exist in the file
-                    for (const id of Object.keys(this.plugin.settings.taskMetadata)) {
-                        if (!currentIds.has(id)) {
-                            const metadata = this.plugin.settings.taskMetadata[id];
-                            const eventId = metadata?.eventId;
-                            await this.plugin.handleTaskDeletion(id, eventId);
-                            changed = true;
-                            LogUtils.debug(`Removed orphaned task ID: ${id}`);
-                        }
-                    }
-
-                    if (changed) {
-                        await this.plugin.saveSettings()
-                    }
-                } catch (error) {
-                    LogUtils.error(`File modification handler error: ${error}`)
-                } finally {
-                    this.modifyLock = false
-                }
-            })
-        )
-    }
+                    this.plugin.registerEvent(
+                        this.plugin.app.vault.on('modify', async (file: TFile) => {
+                            if (this.modifyLock || !file.path.endsWith('.md')) return;
+        
+                            try {
+                                this.modifyLock = true;
+                                const content = await this.plugin.app.vault.read(file);
+                                const currentIdsInFile = new Set(
+                                    Array.from(content.matchAll(this.ID_PATTERN))
+                                        .map(match => match[1])
+                                );
+        
+                                // Get all known task IDs that are associated with *this specific file*
+                                const knownTaskIdsInFile = Object.keys(this.plugin.settings.taskMetadata).filter(taskId => {
+                                    return this.plugin.settings.taskMetadata[taskId]?.filePath === file.path;
+                                });
+        
+                                let changed = false;
+                                for (const id of knownTaskIdsInFile) {
+                                    // If a task was known to be in this file but is no longer present in its content
+                                    if (!currentIdsInFile.has(id)) {
+                                        const metadata = this.plugin.settings.taskMetadata[id];
+                                        const eventId = metadata?.eventId;
+        
+                                        // IMPORTANT: Only delete if the task has been missing for a grace period
+                                        // This prevents accidental deletions due to transient file states.
+                                        const gracePeriodMs = this.plugin.settings.deletionGracePeriodMs ?? 300000; // Default 5 minutes
+                                        if (!metadata?.pendingDeletionTimestamp) {
+                                            LogUtils.debug(`Task ${id} not found in ${file.path}. Marking for pending deletion.`);
+                                            metadata.pendingDeletionTimestamp = Date.now();
+                                            await this.plugin.saveSettings();
+                                            changed = true;
+                                        } else {
+                                            const timeSincePending = Date.now() - metadata.pendingDeletionTimestamp;
+                                            if (timeSincePending >= gracePeriodMs) {
+                                                LogUtils.debug(`Task ${id} still not found in ${file.path} after grace period. Deleting.`);
+                                                await this.plugin.handleTaskDeletion(id, eventId);
+                                                changed = true;
+                                            } else {
+                                                LogUtils.debug(`Task ${id} not found in ${file.path}, but within grace period. Pending deletion for ${Math.round((gracePeriodMs - timeSincePending) / 1000)}s.`);
+                                            }
+                                        }
+                                    } else if (this.plugin.settings.taskMetadata[id]?.pendingDeletionTimestamp) {
+                                        // Task found in file again, clear pending deletion status
+                                        LogUtils.debug(`Task ${id} found again in ${file.path}. Clearing pending deletion status.`);
+                                        this.plugin.settings.taskMetadata[id].pendingDeletionTimestamp = undefined;
+                                        await this.plugin.saveSettings();
+                                        changed = true;
+                                    }
+                                }
+        
+                                if (changed) {
+                                    await this.plugin.saveSettings();
+                                }
+                            } catch (error) {
+                                LogUtils.error(`File modification handler error for ${file.path}: ${error}`);
+                            } finally {
+                                this.modifyLock = false;
+                            }
+                        })
+                    );    }
 
     /**
      * Handles task completion status changes, specifically handling the cleanup 

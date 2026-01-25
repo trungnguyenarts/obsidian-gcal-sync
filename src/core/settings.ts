@@ -6,17 +6,17 @@ import { Notice } from 'obsidian';
 
 export const DEFAULT_SETTINGS: GoogleCalendarSettings = {
     clientId: '',
-    clientSecret: '',
     oauth2Tokens: undefined,
     syncEnabled: true,
     defaultReminder: 30,
-    includeFolders: [],  // Empty by default to scan all folders
+    includeFolders: ['calendar/daily/2025-02-27'],  // Empty by default to scan all folders
     taskMetadata: {},
     taskIds: {},
     verboseLogging: true,  // Default to false for new users
     hasCompletedOnboarding: true,  // Set to true to prevent welcome modal on startup
     mobileSyncLimit: 100,  // Default to 100 files on mobile
     mobileOptimizations: true,  // Enable mobile optimizations by default
+    deletionGracePeriodMs: 300000, // 5 minutes default grace period before deleting orphaned events
 };
 
 export class GoogleCalendarSettingsTab extends PluginSettingTab {
@@ -116,48 +116,19 @@ export class GoogleCalendarSettingsTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                     }
                 }));
-
-        // Custom OAuth Credentials Section
-        containerEl.createEl('h3', { text: 'Custom OAuth Credentials (Advanced)' });
-
-        const oauthDesc = containerEl.createEl('div', { cls: 'setting-item-description' });
-        oauthDesc.style.marginBottom = '1em';
-        oauthDesc.innerHTML = `
-            <p>If you're seeing "This app is blocked" errors, you can use your own Google Cloud OAuth credentials:</p>
-            <ol>
-                <li>Go to <a href="https://console.cloud.google.com/">Google Cloud Console</a></li>
-                <li>Create a new project (or select existing)</li>
-                <li>Enable the Google Calendar API</li>
-                <li>Go to "Credentials" → "Create Credentials" → "OAuth client ID"</li>
-                <li>Choose "Desktop app" as the application type</li>
-                <li>Copy the Client ID and Client Secret below</li>
-                <li>Add <code>http://127.0.0.1:8085/callback</code> to Authorized redirect URIs</li>
-            </ol>
-            <p><strong>Note:</strong> After changing credentials, disconnect and reconnect your Google account.</p>
-        `;
-
+        
         new Setting(containerEl)
-            .setName('Custom Client ID')
-            .setDesc('Your Google OAuth Client ID (leave empty to use default)')
+            .setName('Deletion Grace Period (ms)')
+            .setDesc('How long (in milliseconds) a task remains marked for pending deletion before its Google Calendar event is actually removed. Default is 5 minutes (300000 ms).')
             .addText(text => text
-                .setPlaceholder('xxxxxx.apps.googleusercontent.com')
-                .setValue(this.plugin.settings.clientId || '')
+                .setPlaceholder('300000')
+                .setValue((this.plugin.settings.deletionGracePeriodMs ?? 300000).toString())
                 .onChange(async (value) => {
-                    this.plugin.settings.clientId = value.trim();
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName('Custom Client Secret')
-            .setDesc('Your Google OAuth Client Secret (leave empty to use default)')
-            .addText(text => {
-                text.setPlaceholder('GOCSPX-xxxxxx')
-                    .setValue(this.plugin.settings.clientSecret || '')
-                    .onChange(async (value) => {
-                        this.plugin.settings.clientSecret = value.trim();
+                    const gracePeriod = parseInt(value);
+                    if (!isNaN(gracePeriod) && gracePeriod >= 0) {
+                        this.plugin.settings.deletionGracePeriodMs = gracePeriod;
                         await this.plugin.saveSettings();
-                    });
-                text.inputEl.type = 'password';
-            });
+                    }
+                }));
     }
 }

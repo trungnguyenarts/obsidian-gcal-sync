@@ -52,26 +52,8 @@ export class IdUtils {
      * @returns A time-based ID with cryptographically secure random suffix (16 characters)
      */
     static generateTimeBasedId(): string {
-        // Get timestamp as base (provides ~8-9 chars in base36)
-        const timestamp = Date.now().toString(36);
-
-        // Generate secure random suffix
-        const suffixLength = Math.max(this.ID_LENGTH - timestamp.length, 6);
-        let randomSuffix = '';
-
-        if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
-            const randomValues = new Uint8Array(suffixLength);
-            crypto.getRandomValues(randomValues);
-            for (let i = 0; i < suffixLength; i++) {
-                randomSuffix += this.CHARS.charAt(randomValues[i] % this.CHARS.length);
-            }
-        } else {
-            // Fallback using Math.random (less secure but functional)
-            for (let i = 0; i < suffixLength; i++) {
-                randomSuffix += this.CHARS.charAt(Math.floor(Math.random() * this.CHARS.length));
-            }
-        }
-
-        return (timestamp + randomSuffix).slice(0, this.ID_LENGTH);
+        // Delegate to generateRandomId for robust uniqueness.
+        // The "time-based" aspect is less critical than uniqueness for task IDs.
+        return this.generateRandomId();
     }
 }

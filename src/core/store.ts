@@ -154,7 +154,7 @@ export interface TaskStore {
     updateFileCache: (filePath: string, content: string, modifiedTime: number) => void;
     clearFileCache: () => void;
 
-    plugin: GoogleCalendarSyncPlugin;
+    plugin?: GoogleCalendarSyncPlugin;
 
     // Task Management
     getTaskData: (taskId: string) => Promise<Task | null>;
@@ -351,8 +351,8 @@ export const store = createStore<TaskStore>()(
                                 // This helps avoid race conditions where metadata was just updated
 
                                 // But log the task state for debugging purposes
-                                const existingMetadata = state.plugin.settings.taskMetadata?.[task.id];
-                                if (state.plugin.settings.verboseLogging) {
+                                const existingMetadata = state.plugin?.settings.taskMetadata?.[task.id];
+                                if (state.plugin?.settings.verboseLogging) {
                                     LogUtils.debug(`Enqueueing task ${task.id}:
                                         Task state: title=${task.title}, date=${task.date}, reminder=${task.reminder}
                                         Metadata: ${existingMetadata ?
@@ -361,7 +361,7 @@ export const store = createStore<TaskStore>()(
                                 }
 
                                 // Check for specific conditions that would cause us to skip enqueueing
-                                const metadata = state.plugin.settings.taskMetadata?.[task.id];
+                                const metadata = state.plugin?.settings.taskMetadata?.[task.id];
 
                                 // Skip if the task was just synced
                                 if (metadata?.justSynced && metadata.syncTimestamp) {
@@ -442,6 +442,11 @@ export const store = createStore<TaskStore>()(
                     // Set new timeout for processing
                     set(state => {
                         state.syncTimeout = window.setTimeout(async () => {
+                            // Guard against execution if plugin is no longer active
+                            if (!get().plugin?.isPluginActive) {
+                                LogUtils.debug('enqueueTasks: Plugin not active, skipping timeout callback.');
+                                return;
+                            }
                             const latestState = get();
                             set(state => { state.lastProcessTime = Date.now(); });
 
@@ -464,6 +469,13 @@ export const store = createStore<TaskStore>()(
                                 }
 
                                 const intervalId = window.setInterval(() => {
+                                    // Guard against execution if plugin is no longer active
+                                    if (!get().plugin?.isPluginActive) {
+                                        LogUtils.debug('enqueueTasks: Plugin not active, skipping interval callback.');
+                                        clearInterval(intervalId); // Clear interval if plugin is not active
+                                        set(state => { state.syncQueueCheckerId = null; });
+                                        return;
+                                    }
                                     try {
                                         const currentState = get();
                                         if (!currentState.syncInProgress && currentState.syncQueue.size > 0) {
@@ -489,6 +501,11 @@ export const store = createStore<TaskStore>()(
 
                                     // Safety cleanup after timeout to avoid lingering intervals
                                     state.syncQueueCheckerTimeout = window.setTimeout(() => {
+                                        // Guard against execution if plugin is no longer active
+                                        if (!get().plugin?.isPluginActive) {
+                                            LogUtils.debug('enqueueTasks: Plugin not active, skipping syncQueueCheckerTimeout callback.');
+                                            return;
+                                        }
                                         if (state.syncQueueCheckerId) {
                                             clearInterval(state.syncQueueCheckerId);
                                             state.syncQueueCheckerId = null;
@@ -631,7 +648,7 @@ export const store = createStore<TaskStore>()(
                             if (!task.id) return false;
 
                             // Check if task was just synced
-                            const metadata = state.plugin.settings.taskMetadata[task.id];
+                            const metadata = state.plugin?.settings.taskMetadata[task.id];
                             if (metadata?.justSynced && metadata.syncTimestamp) {
                                 const syncAge = Date.now() - metadata.syncTimestamp;
                                 if (syncAge < TIMING.JUST_SYNCED_WINDOW_MS) {
@@ -692,6 +709,8 @@ export const store = createStore<TaskStore>()(
                             state.status = 'connected';
                             state.lastSyncTime = Date.now();
                         });
+                        // Clear the events cache after the entire batch is processed
+                        state.plugin?.calendarSync?.clearEventsCache();
                     }
                 },
 
@@ -898,6 +917,7 @@ export const store = createStore<TaskStore>()(
                         state.failedSyncs.clear();
                         state.lastSyncTime = null;
                         state.syncInProgress = false;
+                        state.plugin = undefined; // Explicitly nullify the plugin reference
                     });
                 },
 
@@ -1186,6 +1206,10 @@ export const store = createStore<TaskStore>()(
                 getFileContent: async (filePath: string) => {
                     try {
                         const state = get();
+                        if (!state.plugin) {
+                            LogUtils.warn('getFileContent: Plugin not available, cannot read file.');
+                            throw new Error('Plugin not available.');
+                        }
                         const file = state.plugin.app.vault.getAbstractFileByPath(filePath);
 
                         if (!(file instanceof TFile)) {
@@ -1254,7 +1278,7 @@ export const store = createStore<TaskStore>()(
                     state.fileCache.clear();
                 }),
 
-                plugin: null as unknown as GoogleCalendarSyncPlugin,
+                plugin: undefined,
 
                 // Task Management
                 getTaskData: async (taskId: string) => {
@@ -1263,7 +1287,12 @@ export const store = createStore<TaskStore>()(
                     if (cached) {
                         return cached.task;
                     }
-                    return null;
+                    if (!state.plugin || !state.plugin.taskParser) {
+                        LogUtils.warn('getTaskData: Plugin or taskParser not available.');
+                        return null;
+                    }
+                    // Fallback to directly parsing if not in cache (e.g., after cache cleanup)
+                    return await state.plugin.taskParser.getTaskById(taskId);
                 },
 
                 getTaskMetadata: (taskId: string) => {
@@ -1272,14 +1301,19 @@ export const store = createStore<TaskStore>()(
                     if (cached) {
                         return cached.metadata;
                     }
-                    return undefined;
+                    // Fallback to directly getting from plugin settings if not in cache
+                    if (!state.plugin) {
+                        LogUtils.warn('getTaskMetadata: Plugin not available.');
+                        return undefined;
+                    }
+                    return state.plugin.settings.taskMetadata[taskId];
                 },
 
                 hasTaskChanged: (task: Task, metadata?: TaskMetadata) => {
                     const state = get();
 
                     // If no metadata provided, try to get the latest directly from settings
-                    if (!metadata && task.id && state.plugin.settings.taskMetadata) {
+                    if (!metadata && task.id && state.plugin?.settings.taskMetadata) {
                         metadata = state.plugin.settings.taskMetadata[task.id];
                     }
 
@@ -1299,6 +1333,10 @@ export const store = createStore<TaskStore>()(
                         LogUtils.debug(`Sync is disabled, skipping task sync for ${task.id}`);
                         return;
                     }
+                    if (!state.plugin || !state.plugin.calendarSync) {
+                        LogUtils.error('syncTask: Plugin or calendarSync not available.');
+                        return;
+                    }
 
                     try {
                         // Check if task is locked
@@ -1316,7 +1354,10 @@ export const store = createStore<TaskStore>()(
                         let taskChangedDuringProcess = false;
 
                         try {
-                            if (state.plugin.taskParser) {
+                            if (!state.plugin || !state.plugin.taskParser) {
+                                LogUtils.warn('syncTask: Plugin or taskParser not available for fresh data retrieval.');
+                                // If plugin/parser is not available, we can't get fresh data, proceed with original task
+                            } else {
                                 // Get fresh task data - but only once by default for improved performance
                                 const initialTask = await state.plugin.taskParser.getTaskById(task.id);
 
@@ -1524,7 +1565,8 @@ export const useStore = {
 
 export const initializeStore = (pluginInstance: GoogleCalendarSyncPlugin) => {
     store.setState(state => {
-        // Cast to any to bypass the immutability check since we know this is initialization
+        // Re-introduce cast to any to bypass the immutability check for the complex plugin object
+        // The plugin instance itself should not be deep-proxied by Immer
         (state as any).plugin = pluginInstance;
     });
 };
