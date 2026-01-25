@@ -6,17 +6,21 @@ import { Notice } from 'obsidian';
 
 export const DEFAULT_SETTINGS: GoogleCalendarSettings = {
     clientId: '',
-    clientSecret: '',
     oauth2Tokens: undefined,
     syncEnabled: true,
     defaultReminder: 30,
-    includeFolders: [],  // Empty by default to scan all folders
+    includeFolders: ['calendar/daily/2025-02-27'],  // Empty by default to scan all folders
     taskMetadata: {},
     taskIds: {},
     verboseLogging: true,  // Default to false for new users
     hasCompletedOnboarding: true,  // Set to true to prevent welcome modal on startup
     mobileSyncLimit: 100,  // Default to 100 files on mobile
     mobileOptimizations: true,  // Enable mobile optimizations by default
+    deletionGracePeriodMs: 300000, // 5 minutes default grace period before deleting orphaned events
+    customClientId: '',
+    customClientSecret: '',
+    calendarId: 'primary',
+    secretICalAddress: '',
 };
 
 export class GoogleCalendarSettingsTab extends PluginSettingTab {
@@ -117,47 +121,83 @@ export class GoogleCalendarSettingsTab extends PluginSettingTab {
                     }
                 }));
 
-        // Custom OAuth Credentials Section
+        new Setting(containerEl)
+            .setName('Deletion Grace Period (ms)')
+            .setDesc('How long (in milliseconds) a task remains marked for pending deletion before its Google Calendar event is actually removed. Default is 5 minutes (300000 ms).')
+            .addText(text => text
+                .setPlaceholder('300000')
+                .setValue((this.plugin.settings.deletionGracePeriodMs ?? 300000).toString())
+                .onChange(async (value) => {
+                    const gracePeriod = parseInt(value);
+                    if (!isNaN(gracePeriod) && gracePeriod >= 0) {
+                        this.plugin.settings.deletionGracePeriodMs = gracePeriod;
+                        await this.plugin.saveSettings();
+                    }
+                }));
+
+        // Advanced Settings Section: Custom OAuth
         containerEl.createEl('h3', { text: 'Custom OAuth Credentials (Advanced)' });
 
-        const oauthDesc = containerEl.createEl('div', { cls: 'setting-item-description' });
-        oauthDesc.style.marginBottom = '1em';
-        oauthDesc.innerHTML = `
-            <p>If you're seeing "This app is blocked" errors, you can use your own Google Cloud OAuth credentials:</p>
-            <ol>
-                <li>Go to <a href="https://console.cloud.google.com/">Google Cloud Console</a></li>
-                <li>Create a new project (or select existing)</li>
-                <li>Enable the Google Calendar API</li>
-                <li>Go to "Credentials" → "Create Credentials" → "OAuth client ID"</li>
-                <li>Choose "Desktop app" as the application type</li>
-                <li>Copy the Client ID and Client Secret below</li>
-                <li>Add <code>http://127.0.0.1:8085/callback</code> to Authorized redirect URIs</li>
-            </ol>
-            <p><strong>Note:</strong> After changing credentials, disconnect and reconnect your Google account.</p>
-        `;
+        const oauthDesc = containerEl.createDiv();
+        oauthDesc.createEl('p', { text: 'If you\'re seeing "This app is blocked" errors, you can use your own Google Cloud OAuth credentials:' });
+        const list = oauthDesc.createEl('ol');
+        list.createEl('li', { text: 'Go to ' }).createEl('a', { text: 'Google Cloud Console', href: 'https://console.cloud.google.com/' });
+        list.createEl('li', { text: 'Create a new project (or select existing)' });
+        list.createEl('li', { text: 'Enable the Google Calendar API' });
+        list.createEl('li', { text: 'Go to "Credentials" → "Create Credentials" → "OAuth client ID"' });
+        list.createEl('li', { text: 'Choose "Desktop app" as the application type' });
+        list.createEl('li', { text: 'Copy the Client ID and Client Secret below' });
+        list.createEl('li', { text: 'Add http://127.0.0.1:8085/callback to Authorized redirect URIs' });
+
+        const note = oauthDesc.createEl('p', { text: 'Note: After changing credentials, disconnect and reconnect your Google account.' });
+        note.style.color = 'var(--text-error)';
+        note.style.fontWeight = 'bold';
 
         new Setting(containerEl)
             .setName('Custom Client ID')
             .setDesc('Your Google OAuth Client ID (leave empty to use default)')
             .addText(text => text
-                .setPlaceholder('xxxxxx.apps.googleusercontent.com')
-                .setValue(this.plugin.settings.clientId || '')
+                .setPlaceholder('Enter your custom client ID')
+                .setValue(this.plugin.settings.customClientId || '')
                 .onChange(async (value) => {
-                    this.plugin.settings.clientId = value.trim();
+                    this.plugin.settings.customClientId = value.trim();
                     await this.plugin.saveSettings();
                 }));
 
         new Setting(containerEl)
             .setName('Custom Client Secret')
             .setDesc('Your Google OAuth Client Secret (leave empty to use default)')
-            .addText(text => {
-                text.setPlaceholder('GOCSPX-xxxxxx')
-                    .setValue(this.plugin.settings.clientSecret || '')
-                    .onChange(async (value) => {
-                        this.plugin.settings.clientSecret = value.trim();
-                        await this.plugin.saveSettings();
-                    });
-                text.inputEl.type = 'password';
-            });
+            .addText(text => text
+                .setPlaceholder('Enter your custom client secret')
+                .setValue(this.plugin.settings.customClientSecret || '')
+                .onChange(async (value) => {
+                    this.plugin.settings.customClientSecret = value.trim();
+                    await this.plugin.saveSettings();
+                }));
+
+        // Advanced Settings Section: Calendar Connection
+        containerEl.createEl('h3', { text: 'Calendar Connection (Advanced)' });
+
+        new Setting(containerEl)
+            .setName('Google Calendar ID')
+            .setDesc('Default is "primary". Change this if you want to sync with a specific calendar or if you see connection errors.')
+            .addText(text => text
+                .setPlaceholder('e.g. primary or your-calendar-id@group.calendar.google.com')
+                .setValue(this.plugin.settings.calendarId || 'primary')
+                .onChange(async (value) => {
+                    this.plugin.settings.calendarId = value.trim() || 'primary';
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Secret iCal Address')
+            .setDesc('The "Secret address in iCal format" from Google Calendar settings. This will be used for enhanced two-way sync features.')
+            .addText(text => text
+                .setPlaceholder('https://calendar.google.com/calendar/ical/...')
+                .setValue(this.plugin.settings.secretICalAddress || '')
+                .onChange(async (value) => {
+                    this.plugin.settings.secretICalAddress = value.trim();
+                    await this.plugin.saveSettings();
+                }));
     }
 }
