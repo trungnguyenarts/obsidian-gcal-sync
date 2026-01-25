@@ -1,101 +1,77 @@
-# Obsidian Google Calendar Sync
+# Obsidian Google Calendar Sync (Trungnguyenarts Folk Edition)
 
 ## Overview
 
-Obsidian Google Calendar Sync is a plugin for Obsidian that syncs your Obsidian Tasks to Google Calendar as events. It is currently only a one way sync from Obsidian to Google Calendar. The plugin supports syncing reminders, task start/end times, full mobile support and has auto-sync functionality. There's also a repair option which will strip all events in Google Calendar created by this plugin and recreate them, which can be helpful if you experience inconsistencies in the sync process. You can configure a bunch of options in the settings such as default reminder time, limit sync to specific folders/files and optional verbose logging
+This is a specialized "Folk" version of the original [Obsidian Google Calendar Sync](https://github.com/sasoon/obsidian-gcal-sync) plugin. It is designed to bridge Obsidian Tasks and Google Calendar with enhanced features, smarter parsing, and better visual organization.
 
-A quick note on metadata and task IDs: 
+This edition includes several "quality of life" improvements developed to streamline the workflow for power users.
 
-The plugin uses IDs in the form of HTML comments included as part of the task content in order to reliably  and persistently track tasks across different lines, files, app reboots or even across vaults. You'll see the IDs at the end each task line, and throughout your editing the ID will always be pushed to the end of the line for clarity. The IDs themselves are protected so you don't accidentally delete them, however they are deletable if you delete the entire task line (this is by design). The IDs are saved into the metadata, which itself lives in the plugin settings along with your oauth tokens. This keeps your task metadata and auth status consistent across sessions and devices
+---
 
-## Installation
+## ✨ Folk Edition Enhancements
+
+Compared to the base version, this edition offers:
+
+*   **Enhanced Task Parsing**:
+    *   **Flexible Time Syntax**: Supports the standard `-` separator for time ranges (e.g., `⏰ 09:00 - 10:00`). 
+    *   **Expanded Status Support**: Recognizes more task states like `/` (In Progress), `>` (Deferred), and `!` (Important).
+*   **Smart Content Handling**:
+    *   **Title/Description Split**: Use the `//` separator to keep your Google Calendar clean. Text before `//` becomes the event title; text after becomes the event description.
+    *   **Multi-line Support**: Automatically includes indented lines below a task into the Google Calendar description.
+*   **Visual & Performance Upgrades**:
+    *   **Numerical Color IDs**: Set event colors using `🎨 #1` to `🎨 #11`. This avoids interference with Obsidian's tag system while allowing direct color control from your notes.
+    *   **Title Metadata Cleaner**: Advanced filtering removes tags, IDs, reminders, and color codes from the Google Calendar title for a professional look.
+    *   **Safe Sync & Performance**: Includes a **5-minute Grace Period** to prevent accidental deletions and optimized **Batch Processing** for a smooth mobile experience.
+
+---
+
+## 🚀 Installation
 
 ### Requirements
-[Obsidian Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks)
+*   [Obsidian Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks) (Recommended)
 
-### Installing the Plugin
-Currently the plugin has not been added to the Obsidian Community plugins yet, this will happen after some testing and feedback from early users
+### Manual Installation
+1.  Download the repository or the latest release.
+2.  Copy `main.js`, `manifest.json`, and `styles.css` to your vault's `.obsidian/plugins/obsidian-gcal-sync/` directory.
+3.  Enable the plugin in **Settings > Community Plugins**.
 
-#### Manual Installation
-1. Download the latest release from [GitHub Releases](https://github.com/sasoon/obsidian-gcal-sync/releases)
-2. Extract the zip file into your Obsidian vault's `.obsidian/plugins/` directory
-3. Restart Obsidian and enable the plugin in Settings > Community Plugins
+---
 
-## Authentication & Setup
-Desktop authenticates using your local server, however mobile does not support this so I have created a Netlify landing page with a serverless function that will authenticate your device. If you have security concerns, feel free to bypass the Netlify layer by authenticating via desktop and syncing your auth tokens to mobile via Obsidian Sync, git or any other method you prefer. You do not need to setup your own Google Cloud project to authenticate, however you can if you want to. The Google verification page currently says "Google hasn’t verified this app", I am currently working on verifying the app
+## 🔐 Authentication & Setup
 
-### Desktop Setup (Windows, macOS, Linux)
-1. Click the plugin icon in the ribbon or status bar
-3. The plugin will open your browser for authentication
-4. A local web server will handle the OAuth callback (port 8085)
-5. Grant the requested permissions
-6. Return to Obsidian - you should see a success message
-7. Your tasks will now sync with Google Calendar
+The plugin uses **OAuth 2.0 with PKCE** for secure authentication. 
 
-### Mobile Setup (iOS, Android)
-1. Click the plugin icon in the ribbon or status bar
-3. The plugin will open your browser for authentication
-4. After authorizing, you'll be redirected to a Netlify authentication service
-5. The service will send you back to Obsidian
-6. The plugin will complete authentication and show a success message
-7. Your tasks will now sync with Google Calendar
+*   **Desktop**: Authenticates via a local web server (port 8085).
+*   **Mobile**: Uses a secure Netlify landing page to handle the authentication flow.
 
-## Usage
+*Note: The "Google hasn't verified this app" warning is expected; your tokens are stored locally and never shared.*
 
-### Basic Usage
-1. Create tasks in Obsidian using the checkbox syntax `- [ ] Task description`
-2. The plugin will automatically add a task ID to the end of each task line
-3. Tasks will sync to Google Calendar based on your settings
-4. Changes to task descriptions, dates, or completion status will sync automatically
+---
 
-![image](https://github.com/user-attachments/assets/aa9d9790-7cb5-4d5f-be0e-c38c47edff3b)
+## 📝 Syntax & Usage
 
+To sync a task, use the following standardized format:
 
-### Date and Time Formats
-The plugin recognizes these date formats in your tasks:
-- `📅 YYYY-MM-DD` - Task date without time
-- `⏰ HH:MM` - Start time
-- `➡️ 15:30` - End time
-- `📅 YYYY-MM-DD ⏰ HH:MM` - Task date with time
-- `⏳ YYYY-MM-DD` - Start date for tasks with a duration
+`- [ ] 🔔 [Reminder] ⏰ [Time] [Summary] // [Detailed Description] #project 🎨 #[ColorID]`
 
-### Reminders
-- Set a reminder with `🔔XX` where XX is the time before the task. It accepts minutes, hours and days in the following syntax: `🔔25m`, `🔔9h`, `🔔3d`. Make sure the reminder follows the emoji with no space in between them. The reminder can be anywhere in the task
-- Example: `- [ ] Buy keyboard 🔔1d 📅 2025-03-04`
-- If no reminder value is specified, the default reminder time from settings is used
+### Date & Time Formats
+*   `📅 YYYY-MM-DD`: Task date.
+*   `⏰ HH:MM`: Start time.
+*   `- HH:MM`: End time. (Use `-` for best compatibility with the Obsidian Calendar plugin's Timeline view).
+*   `🔔 30m / 🔔 2h / 🔔 1d`: Reminder offset.
 
-### Configuration Options
-In the plugin settings, you can:
-- Enable/disable auto-sync
-- Set a default reminder time (in minutes)
-- Limit sync to specific folders
-- Enable verbose logging for troubleshooting
-- Adjust mobile optimizations and file scan limits
+### Color Mapping (Numerical)
+Use `🎨 #<1-11>` to match Google Calendar's default color palette (e.g., `🎨 #1` for Lavender, `🎨 #10` for Basil).
 
-![image](https://github.com/user-attachments/assets/93756ab2-ef72-40ba-9d26-410cee7335c3)
+---
 
+## 🛡️ Security & Privacy
+*   **Local Storage**: All OAuth tokens and metadata stay within your vault.
+*   **Direct API**: Communications happen directly between your device and Google APIs.
+*   **No Tracking**: No external storage or tracking services are used.
 
-### Ribbon
-The plugin adds a ribbon on desktop and mobile which can be used to initiate a manual sync, toggle auto-sync, repair and disconnect from Google Calendar. The auto-sync will sync your changes to Gcal on demand. If you experience a sync disruption of any kind, run the repair command to strip your Gcal of Obsidian Tasks and recreate them. This should generally fix most desynchronization issues. Disconnect will delete your oauth tokens, and will prompt you to reconnect. The ribbon also acts as a status indicator on desktop, and will update dynamically to indicate sync status and active syncs
+## 🤝 Support & Credits
+Building upon the great work by **Sasoon Sarkisian**. For the folk version details, refer to the project logs in the documentation.
 
-![image](https://github.com/user-attachments/assets/8d23e5da-224c-4f70-9a60-5b761b11d727)
-
-![image](https://github.com/user-attachments/assets/af2f3c1c-fe60-463f-a23d-8c8134ecea55)
-
-![image](https://github.com/user-attachments/assets/03ea4bc3-b8eb-4ddb-b0f0-82ffe3e09064)
-
-
-## Security and Privacy
-
-- **OAuth 2.0 with PKCE**: Secure authentication without storing your Google password
-- **Local Token Storage**: OAuth tokens are stored only in your Obsidian vault settings
-- **No External Data Storage**: The plugin only communicates directly with Google APIs
-- **Mobile Authentication**: The Netlify service only exchanges auth codes for tokens and never stores your credentials
-
-## Support
-
-For issues, questions, or feature requests, please visit the [GitHub repository](https://github.com/sasoon/obsidian-gcal-sync).
-
-## License
-
-GNU General Public License v3.0 (GPL-3.0)
+---
+*Developed and maintained by **trungnguyenarts** with help from **Em Thư Ký**.*
