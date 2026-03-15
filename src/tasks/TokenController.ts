@@ -1,9 +1,10 @@
 import { Extension, StateField, StateEffect, RangeSet, RangeSetBuilder, EditorState, Transaction } from "@codemirror/state"
 import { EditorView, Decoration, DecorationSet, WidgetType, ViewPlugin, ViewUpdate } from "@codemirror/view"
-import { TFile, Editor, Platform } from "obsidian"
+import { TFile, Editor } from "obsidian"
 import type GoogleCalendarSyncPlugin from '../core/main'
+import type { TaskMetadata } from '../core/types'
 import { LogUtils } from '../utils/logUtils'
-import { ErrorUtils } from '../utils/errorUtils'
+import { IdUtils } from '../utils/idUtils'
 import debounce from 'just-debounce-it'
 
 
@@ -35,7 +36,10 @@ export class TokenController {
     private plugin: GoogleCalendarSyncPlugin
     private modifyLock = false
     private readonly ID_PATTERN = /<!-- task-id: ([a-z0-9]+) -->/g
+    private readonly SINGLE_ID_PATTERN = /<!-- task-id: ([a-z0-9]+) -->/
     private readonly COMPLETION_PATTERN = /✅ \d{4}-\d{2}-\d{2}/g
+    private readonly TASK_LINE_PATTERN = /^\s*- \[[ xX]\] /
+    private readonly TASK_STATUS_PATTERN = /^\s*- \[[ xX\/\->!]\]\s*/
     private lastEditTime: number = 0
 
     constructor(plugin: GoogleCalendarSyncPlugin) {
@@ -74,7 +78,7 @@ export class TokenController {
         
                             try {
                                 this.modifyLock = true;
-                                const content = await this.plugin.app.vault.read(file);
+                                const content = await this.ensureTaskIdsInFile(file);
                                 const currentIdsInFile = new Set(
                                     Array.from(content.matchAll(this.ID_PATTERN))
                                         .map(match => match[1])
@@ -129,6 +133,76 @@ export class TokenController {
                             }
                         })
                     );    }
+
+    private createTaskMetadata(id: string, lineText: string, filePath: string, now: number = Date.now()): TaskMetadata {
+        return {
+            filePath,
+            createdAt: now,
+            lastModified: now,
+            lastSynced: now,
+            eventId: '',
+            title: lineText
+                .replace(this.SINGLE_ID_PATTERN, '')
+                .replace(this.TASK_STATUS_PATTERN, '')
+                .trim(),
+            date: new Date(now).toISOString().split('T')[0],
+            completed: /^\s*- \[[xX]\]/.test(lineText),
+        };
+    }
+
+    private isTaskLineMissingId(line: string): boolean {
+        return this.TASK_LINE_PATTERN.test(line) && !this.SINGLE_ID_PATTERN.test(line);
+    }
+
+    private appendTaskIdToLine(line: string, id: string): string {
+        return `${line.trimEnd()} ${this.renderTaskId(id)}`;
+    }
+
+    private renderTaskId(id: string): string {
+        return `<!-- task-id: ${id} -->`;
+    }
+
+    private generateTaskIdValue(): string {
+        return IdUtils.generateTimeBasedId();
+    }
+
+    private async ensureTaskIdsInFile(file: TFile): Promise<string> {
+        const initialContent = await this.plugin.app.vault.read(file);
+        if (!initialContent.split('\n').some(line => this.isTaskLineMissingId(line))) {
+            return initialContent;
+        }
+
+        const generatedMetadata = new Map<string, TaskMetadata>();
+        const updatedContent = await this.plugin.app.vault.process(file, (latestContent) => {
+            const lines = latestContent.split('\n');
+            let changed = false;
+
+            for (let index = 0; index < lines.length; index++) {
+                const line = lines[index];
+                if (!this.isTaskLineMissingId(line)) {
+                    continue;
+                }
+
+                const id = this.generateTaskIdValue();
+                lines[index] = this.appendTaskIdToLine(line, id);
+                generatedMetadata.set(id, this.createTaskMetadata(id, line, file.path));
+                changed = true;
+
+                LogUtils.debug(`Backfilled task ID ${id} for ${file.path}:${index + 1}`);
+            }
+
+            return changed ? lines.join('\n') : latestContent;
+        });
+
+        if (generatedMetadata.size > 0) {
+            for (const [id, metadata] of generatedMetadata) {
+                this.plugin.settings.taskMetadata[id] = metadata;
+            }
+            await this.plugin.saveSettings();
+        }
+
+        return updatedContent;
+    }
 
     /**
      * Handles task completion status changes, specifically handling the cleanup 
@@ -779,12 +853,8 @@ export class TokenController {
     // Private implementation of generateTaskId
     private _generateTaskId(view: EditorView, pos: number): string {
         try {
-            // Import the IdUtils class we created for mobile compatibility
-            // Using delayed import to avoid potential issues on load
-            const { IdUtils } = require('../utils/idUtils');
-
             // Generate a time-based ID for better uniqueness
-            const id = IdUtils.generateTimeBasedId();
+            const id = this.generateTaskIdValue();
             const now = Date.now();
             const line = view.state.doc.lineAt(pos);
             const file = this.plugin.app.workspace.getActiveFile();
@@ -809,7 +879,7 @@ export class TokenController {
             }
 
             // Create the task ID
-            const taskId = `<!-- task-id: ${id} -->`;
+            const taskId = this.renderTaskId(id);
 
             // Insert the ID at the end of the line
             // This helps with tag parsing and general readability
@@ -829,16 +899,8 @@ export class TokenController {
             view.dispatch(transaction);
 
             // Store metadata about this task
-            this.plugin.settings.taskMetadata[id] = {
-                createdAt: now,
-                lastModified: now,
-                lastSynced: now,
-                eventId: '', // Will be filled when synced with Google Calendar
-                title: line.text.replace(/^\s*- \[[ xX]\] /, ''),
-                date: new Date().toISOString().split('T')[0],
-                completed: line.text.indexOf('- [x]') >= 0 || line.text.indexOf('- [X]') >= 0,
-            };
-            this.plugin.saveSettings();
+            this.plugin.settings.taskMetadata[id] = this.createTaskMetadata(id, line.text, file.path, now);
+            void this.plugin.saveSettings();
 
             LogUtils.debug(`Generated new task ID: ${id}`);
 
@@ -918,9 +980,7 @@ export class TokenController {
     public getTaskId(state: EditorState, pos: number): string | null {
         try {
             const line = state.doc.lineAt(pos)
-            // For single match operations, create a non-global version of the pattern
-            const singleMatchPattern = /<!-- task-id: ([a-z0-9]+) -->/
-            const match = line.text.match(singleMatchPattern)
+            const match = line.text.match(this.SINGLE_ID_PATTERN)
             return match ? match[1] : null
         } catch (error) {
             LogUtils.error(`Error getting task ID: ${error}`)
